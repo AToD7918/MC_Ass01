@@ -1,6 +1,7 @@
 package com.example.myapplication
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -8,6 +9,8 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -101,6 +104,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         enableEdgeToEdge()
 
+        // 모든 파일 접근 권한 확인 (공용 폴더 저장에 필요)
+        if (!Environment.isExternalStorageManager()) {
+            startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+        }
+
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
@@ -177,7 +185,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         sessionId = "${selectedLabel}_$timestamp"
 
-        val dir = getExternalFilesDir(null) ?: filesDir
+        // 공용 저장소의 mobileComputing 폴더에 저장
+        val dir = File(Environment.getExternalStorageDirectory(), "mobileComputing")
+        if (!dir.exists()) dir.mkdirs()
         csvFile = File(dir, "${sessionId}.csv")
 
         csvWriter = BufferedWriter(FileWriter(csvFile)).apply {
@@ -339,7 +349,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
             HorizontalDivider()
 
-            // 상태 메시지 및 마지막 저장된 파일 경로 표시
             Text(statusMessage, fontSize = 14.sp)
             if (lastSavedFile.isNotEmpty()) {
                 Text("Path: $lastSavedFile", fontSize = 11.sp, color = Color.Gray)
