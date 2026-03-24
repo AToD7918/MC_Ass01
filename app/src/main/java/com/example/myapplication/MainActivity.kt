@@ -49,21 +49,25 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+// 센서 데이터 수집 및 CSV 저장을 담당하는 메인 액티비티
+// SensorEventListener를 구현하여 가속도계/자이로스코프 이벤트를 직접 수신
 class MainActivity : ComponentActivity(), SensorEventListener {
 
+    // 센서 매니저 및 센서 객체
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
     private var gyroscope: Sensor? = null
 
-    // Sensor values
+    // 가속도계 실시간 값 (Compose UI 갱신용 mutableState)
     private var accX by mutableStateOf(0f)
     private var accY by mutableStateOf(0f)
     private var accZ by mutableStateOf(0f)
+    // 자이로스코프 실시간 값
     private var gyroX by mutableStateOf(0f)
     private var gyroY by mutableStateOf(0f)
     private var gyroZ by mutableStateOf(0f)
 
-    // Recording state
+    // 녹화 상태 및 세션 정보
     private var isRecording by mutableStateOf(false)
     private var selectedLabel by mutableStateOf("standing_still")
     private var sessionId by mutableStateOf("")
@@ -73,22 +77,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var lastSavedFile by mutableStateOf("")
     private var statusMessage by mutableStateOf("Ready")
 
+    // CSV 파일 쓰기 객체
     private var csvWriter: BufferedWriter? = null
     private var csvFile: File? = null
 
-    // Graph history (last N samples per axis)
+    // 그래프용 최근 샘플 히스토리 (최대 graphSize개 유지)
     private val graphSize = 100
     private var accHistory by mutableStateOf(listOf<Triple<Float, Float, Float>>())
     private var gyroHistory by mutableStateOf(listOf<Triple<Float, Float, Float>>())
 
-    // Fixed experiment metadata
+    // 실험 고정 메타데이터 (왼손, 화면 몸쪽 방향)
     private val phoneHand = "left_hand"
     private val screenDirection = "screen_toward_body"
 
+    // 수집 대상 활동 라벨 목록
     private val labels = listOf(
         "standing_still", "walking", "running", "stairs_up", "stairs_down"
     )
 
+    // 액티비티 생성 시 센서 초기화 및 Compose UI 설정
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -107,6 +114,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
+    // 화면 복귀 시 센서 리스너 등록 (SENSOR_DELAY_GAME 주기)
     override fun onResume() {
         super.onResume()
         accelerometer?.let {
@@ -117,12 +125,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
+    // 화면 이탈 시 센서 해제 및 녹화 중이면 자동 중지
     override fun onPause() {
         super.onPause()
         sensorManager.unregisterListener(this)
         if (isRecording) stopRecording()
     }
 
+    // 센서 값 수신 콜백 — 가속도계/자이로스코프 값 갱신 및 히스토리 누적
     override fun onSensorChanged(event: SensorEvent) {
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
@@ -143,6 +153,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
+    // 현재 센서 값 한 줄을 CSV에 기록
     private fun writeCsvRow() {
         val now = System.currentTimeMillis()
         val elapsed = now - recordingStartTime
@@ -161,6 +172,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
+    // 녹화 시작 — CSV 파일 생성 및 헤더/메타데이터 작성
     private fun startRecording() {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         sessionId = "${selectedLabel}_$timestamp"
@@ -183,6 +195,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         statusMessage = "Recording..."
     }
 
+    // 녹화 중지 — 파일 flush/close 후 저장 완료 메시지 표시
     private fun stopRecording() {
         isRecording = false
         try {
@@ -194,6 +207,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         statusMessage = "Saved: ${csvFile?.name} ($sampleCount samples)"
     }
 
+    // 데이터 수집 화면 전체 UI 구성
     @Composable
     fun DataCollectionScreen(modifier: Modifier = Modifier) {
         Column(
@@ -208,7 +222,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 style = MaterialTheme.typography.headlineMedium
             )
 
-            // Label selector - buttons (2 rows)
+            // 활동 라벨 선택 버튼 (첫 번째 줄: 3개)
             Text("Activity Label:", style = MaterialTheme.typography.titleSmall)
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -231,6 +245,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     }
                 }
             }
+            // 활동 라벨 선택 버튼 (두 번째 줄: 2개)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -255,7 +270,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
             HorizontalDivider()
 
-            // Accelerometer
+            // 가속도계 실시간 값 및 그래프
             Text("Accelerometer (m/s²)", style = MaterialTheme.typography.titleSmall)
             Text(
                 String.format(Locale.US, "X: %.4f   Y: %.4f   Z: %.4f", accX, accY, accZ),
@@ -267,7 +282,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 yRange = 20f
             )
 
-            // Gyroscope
+            // 자이로스코프 실시간 값 및 그래프
             Text("Gyroscope (rad/s)", style = MaterialTheme.typography.titleSmall)
             Text(
                 String.format(Locale.US, "X: %.4f   Y: %.4f   Z: %.4f", gyroX, gyroY, gyroZ),
@@ -281,7 +296,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
             HorizontalDivider()
 
-            // Recording status
+            // 녹화 상태 표시 (RECORDING / IDLE)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     if (isRecording) "● RECORDING" else "○ IDLE",
@@ -298,7 +313,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 Text("Session: $sessionId", fontSize = 12.sp, color = Color.Gray)
             }
 
-            // Start / Stop
+            // Start / Stop 버튼
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -324,6 +339,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
             HorizontalDivider()
 
+            // 상태 메시지 및 마지막 저장된 파일 경로 표시
             Text(statusMessage, fontSize = 14.sp)
             if (lastSavedFile.isNotEmpty()) {
                 Text("Path: $lastSavedFile", fontSize = 11.sp, color = Color.Gray)
@@ -331,6 +347,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
+    // 센서 X/Y/Z 축 데이터를 Canvas에 라인 그래프로 표시. accelometer와 gyroscope에 공통으로 사용
     @Composable
     fun SensorGraph(
         history: List<Triple<Float, Float, Float>>,
