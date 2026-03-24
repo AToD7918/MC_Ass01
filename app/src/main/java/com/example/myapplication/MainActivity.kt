@@ -170,8 +170,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             w.write(
                 String.format(
                     Locale.US,
-                    "%d,%d,%s,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
-                    now, elapsed, selectedLabel, sessionId,
+                    "%d,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+                    elapsed, selectedLabel,
                     accX, accY, accZ, gyroX, gyroY, gyroZ
                 )
             )
@@ -193,9 +193,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         csvWriter = BufferedWriter(FileWriter(csvFile)).apply {
             write("# phone_hand=$phoneHand\n")
             write("# screen_direction=$screenDirection\n")
-            write("# device_model=${Build.MODEL}\n")
-            write("# recording_start=$timestamp\n")
-            write("timestamp_ms,elapsed_ms,label,session_id,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n")
+            write("# label=$selectedLabel\n")
+            write("elapsed_ms,label,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n")
         }
 
         recordingStartTime = System.currentTimeMillis()
@@ -205,10 +204,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         statusMessage = "Recording..."
     }
 
-    // 녹화 중지 — 파일 flush/close 후 저장 완료 메시지 표시
+    // 녹화 중지 — 총 녹화시간/샘플수 기록 후 파일 close
     private fun stopRecording() {
         isRecording = false
+        val totalMs = System.currentTimeMillis() - recordingStartTime
         try {
+            csvWriter?.write("# total_recording_time_ms=$totalMs\n")
+            csvWriter?.write("# num_samples=$sampleCount\n")
             csvWriter?.flush()
             csvWriter?.close()
         } catch (_: Exception) { }
