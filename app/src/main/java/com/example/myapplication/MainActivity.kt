@@ -84,6 +84,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var csvWriter: BufferedWriter? = null
     private var csvFile: File? = null
 
+    // 앞뒤 3초 트림용 (trimMs 이내 데이터는 버퍼에만 보관)
+    private val trimMs = 3000L
+    private val rowBuffer = mutableListOf<Pair<Long, String>>()
+
     // 그래프용 최근 샘플 히스토리 (최대 graphSize개 유지)
     private val graphSize = 100
     private var accHistory by mutableStateOf(listOf<Triple<Float, Float, Float>>())
@@ -161,21 +165,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    // 현재 센서 값 한 줄을 CSV에 기록
+    // 현재 센서 값을 버퍼에 추가하고, 3초 지난 데이터만 CSV에 기록
     private fun writeCsvRow() {
-        val now = System.currentTimeMillis()
-        val elapsed = now - recordingStartTime
+        val elapsed = System.currentTimeMillis() - recordingStartTime
         elapsedSeconds = (elapsed / 1000).toInt()
-        csvWriter?.let { w ->
-            w.write(
-                String.format(
-                    Locale.US,
-                    "%d,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
-                    elapsed, selectedLabel,
-                    accX, accY, accZ, gyroX, gyroY, gyroZ
-                )
-            )
-            w.newLine()
+
+        // 앞 3초는 수집하지 않음
+        if (elapsed < trimMs) return
+
+        val row = String.format(
+            Locale.US,
+            "%d,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+            elapsed, selectedLabel,
+            accX, accY, accZ, gyroX, gyroY, gyroZ
+        )
+        rowBuffer.add(Pair(elapsed, row))
+
+        // 3초 지난 행만 CSV에 기록
+        while (rowBuffer.isNotEmpty() && elapsed - rowBuffer[0].first >= trimMs) {
+            csvWriter?.apply { write(rowBuffer.removeFirst().second); newLine() }
             sampleCount++
         }
     }
@@ -197,6 +205,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             write("elapsed_ms,label,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n")
         }
 
+        rowBuffer.clear()
         recordingStartTime = System.currentTimeMillis()
         sampleCount = 0
         elapsedSeconds = 0
@@ -204,13 +213,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         statusMessage = "Recording..."
     }
 
-    // 녹화 중지 — 총 녹화시간/샘플수 기록 후 파일 close
+    // 녹화 중지 — 버퍼(최근 3초)는 버리고 파일 close
     private fun stopRecording() {
         isRecording = false
+        rowBuffer.clear()
         val totalMs = System.currentTimeMillis() - recordingStartTime
         try {
             csvWriter?.write("# total_recording_time_ms=$totalMs\n")
-            csvWriter?.write("# num_samples=$sampleCount\n")
+            csvWriter?.write("# num_samples_after_trim=$sampleCount\n")
             csvWriter?.flush()
             csvWriter?.close()
         } catch (_: Exception) { }
