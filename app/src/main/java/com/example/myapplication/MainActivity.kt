@@ -11,21 +11,20 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -34,11 +33,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.myapplication.ui.theme.MyApplicationTheme
@@ -75,6 +75,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private var csvWriter: BufferedWriter? = null
     private var csvFile: File? = null
+
+    // Graph history (last N samples per axis)
+    private val graphSize = 100
+    private var accHistory by mutableStateOf(listOf<Triple<Float, Float, Float>>())
+    private var gyroHistory by mutableStateOf(listOf<Triple<Float, Float, Float>>())
 
     // Fixed experiment metadata
     private val phoneHand = "left_hand"
@@ -124,13 +129,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 accX = event.values[0]
                 accY = event.values[1]
                 accZ = event.values[2]
-                // CSV 기록은 accelerometer 이벤트 기준으로 작성
+                accHistory = (accHistory + Triple(accX, accY, accZ)).takeLast(graphSize)
                 if (isRecording) writeCsvRow()
             }
             Sensor.TYPE_GYROSCOPE -> {
                 gyroX = event.values[0]
                 gyroY = event.values[1]
                 gyroZ = event.values[2]
+                gyroHistory = (gyroHistory + Triple(gyroX, gyroY, gyroZ)).takeLast(graphSize)
             }
         }
     }
@@ -202,31 +208,47 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 style = MaterialTheme.typography.headlineMedium
             )
 
-            // Label selector
+            // Label selector - buttons (2 rows)
             Text("Activity Label:", style = MaterialTheme.typography.titleSmall)
-            var expanded by remember { mutableStateOf(false) }
-            Box {
-                OutlinedButton(
-                    onClick = { if (!isRecording) expanded = true },
-                    enabled = !isRecording,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(selectedLabel)
-                    Spacer(Modifier.weight(1f))
-                    Text("▼")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                labels.take(3).forEach { label ->
+                    val isSel = label == selectedLabel
+                    if (isSel) {
+                        Button(
+                            onClick = {},
+                            enabled = !isRecording,
+                            modifier = Modifier.weight(1f)
+                        ) { Text(label, fontSize = 11.sp, maxLines = 1) }
+                    } else {
+                        OutlinedButton(
+                            onClick = { selectedLabel = label },
+                            enabled = !isRecording,
+                            modifier = Modifier.weight(1f)
+                        ) { Text(label, fontSize = 11.sp, maxLines = 1) }
+                    }
                 }
-                DropdownMenu(
-                    expanded = expanded,
-                    onDismissRequest = { expanded = false }
-                ) {
-                    labels.forEach { label ->
-                        DropdownMenuItem(
-                            text = { Text(label) },
-                            onClick = {
-                                selectedLabel = label
-                                expanded = false
-                            }
-                        )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                labels.drop(3).forEach { label ->
+                    val isSel = label == selectedLabel
+                    if (isSel) {
+                        Button(
+                            onClick = {},
+                            enabled = !isRecording,
+                            modifier = Modifier.weight(1f)
+                        ) { Text(label, fontSize = 11.sp, maxLines = 1) }
+                    } else {
+                        OutlinedButton(
+                            onClick = { selectedLabel = label },
+                            enabled = !isRecording,
+                            modifier = Modifier.weight(1f)
+                        ) { Text(label, fontSize = 11.sp, maxLines = 1) }
                     }
                 }
             }
@@ -239,12 +261,22 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 String.format(Locale.US, "X: %.4f   Y: %.4f   Z: %.4f", accX, accY, accZ),
                 fontSize = 14.sp
             )
+            SensorGraph(
+                history = accHistory,
+                label = "Accel",
+                yRange = 20f
+            )
 
             // Gyroscope
             Text("Gyroscope (rad/s)", style = MaterialTheme.typography.titleSmall)
             Text(
                 String.format(Locale.US, "X: %.4f   Y: %.4f   Z: %.4f", gyroX, gyroY, gyroZ),
                 fontSize = 14.sp
+            )
+            SensorGraph(
+                history = gyroHistory,
+                label = "Gyro",
+                yRange = 10f
             )
 
             HorizontalDivider()
@@ -296,6 +328,56 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             if (lastSavedFile.isNotEmpty()) {
                 Text("Path: $lastSavedFile", fontSize = 11.sp, color = Color.Gray)
             }
+        }
+    }
+
+    @Composable
+    fun SensorGraph(
+        history: List<Triple<Float, Float, Float>>,
+        label: String,
+        yRange: Float
+    ) {
+        val xColor = Color.Red
+        val yColor = Color.Green
+        val zColor = Color.Blue
+
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(120.dp)
+        ) {
+            val w = size.width
+            val h = size.height
+            val mid = h / 2f
+
+            // 중앙선
+            drawLine(Color.LightGray, Offset(0f, mid), Offset(w, mid))
+
+            if (history.size < 2) return@Canvas
+
+            val step = w / (graphSize - 1).toFloat()
+            val offset = graphSize - history.size
+
+            fun drawAxis(extract: (Triple<Float, Float, Float>) -> Float, color: Color) {
+                for (i in 1 until history.size) {
+                    val x0 = (offset + i - 1) * step
+                    val x1 = (offset + i) * step
+                    val y0 = mid - (extract(history[i - 1]) / yRange) * mid
+                    val y1 = mid - (extract(history[i]) / yRange) * mid
+                    drawLine(color, Offset(x0, y0), Offset(x1, y1), strokeWidth = 2f)
+                }
+            }
+
+            drawAxis({ it.first }, xColor)
+            drawAxis({ it.second }, yColor)
+            drawAxis({ it.third }, zColor)
+        }
+
+        // 범례
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("— X", color = Color.Red, fontSize = 11.sp)
+            Text("— Y", color = Color.Green, fontSize = 11.sp)
+            Text("— Z", color = Color.Blue, fontSize = 11.sp)
         }
     }
 }
