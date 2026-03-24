@@ -216,7 +216,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         } catch (_: Exception) { }
         csvWriter = null
         lastSavedFile = csvFile?.absolutePath ?: ""
-        statusMessage = "Saved: ${csvFile?.name} ($sampleCount samples)"
+        statusMessage = "Saved"
     }
 
     // 데이터 수집 화면 전체 UI 구성
@@ -235,7 +235,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             )
 
             // 활동 라벨 선택 버튼 (첫 번째 줄: 3개)
-            Text("Activity Label:", style = MaterialTheme.typography.titleSmall)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -347,13 +346,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 ) {
                     Text("Stop")
                 }
-            }
-
-            HorizontalDivider()
-
-            Text(statusMessage, fontSize = 14.sp)
-            if (lastSavedFile.isNotEmpty()) {
-                Text("Path: $lastSavedFile", fontSize = 11.sp, color = Color.Gray)
             }
         }
     }
