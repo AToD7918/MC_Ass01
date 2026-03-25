@@ -670,33 +670,38 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
         fig.savefig(os.path.join(out_dir, f"{base}_w_v_w_h.png"), dpi=150)
         plt.close(fig)
 
-    # ── window feature trends (stride 별) ──
-    wf_map = getattr(parsed, '_window_features_map', None)
-    if wf_map is None:
-        wf_single = getattr(parsed, '_window_features', None)
-        if wf_single is not None and not wf_single.empty:
-            wf_map = {0.5: wf_single}
-    if wf_map:
-        for stride_val, wf in wf_map.items():
-            if wf is None or wf.empty:
-                continue
-            stride_tag = f"_s{stride_val}"
-            mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
-            fig, axes = plt.subplots(3, 2, figsize=(14, 10))
-            feat_pairs = [
-                ("S_v", "Std a_v"), ("R_impact", "Impact Ratio"),
-                ("J_v", "Jerk (vertical)"), ("R_HF", "HF Energy Ratio"),
-                ("E_w_h", "Horiz Gyro Energy"), ("step_freq", "Step Freq (Hz)"),
-            ]
-            for ax, (col, title) in zip(axes.flat, feat_pairs):
-                if col in wf.columns:
-                    ax.plot(mid_t, wf[col], marker=".", markersize=2, linewidth=0.8)
-                ax.set_title(title)
-                ax.set_xlabel("elapsed_ms")
-            fig.suptitle(f"Window Features (stride={stride_val}s) — {label_str} ({parsed.filename})", fontsize=11)
-            fig.tight_layout()
-            fig.savefig(os.path.join(out_dir, f"{base}_window_features{stride_tag}.png"), dpi=150)
-            plt.close(fig)
+    # ── window feature trends (window × stride 별) ──
+    _WINDOWS = [1.0, 1.5, 2.0, 3.0]
+    _STRIDES = [0.5, 1.0, 1.5, 2.0]
+    wf_grid = getattr(parsed, '_wf_grid', None)
+    if wf_grid is None:
+        # fallback: 기존 _window_features_map 사용
+        wf_map = getattr(parsed, '_window_features_map', None)
+        if wf_map:
+            wf_grid = {(2.0, s): v for s, v in wf_map.items()}
+    if wf_grid:
+        for win_val in _WINDOWS:
+            for stride_val in _STRIDES:
+                wf = wf_grid.get((win_val, stride_val))
+                if wf is None or wf.empty:
+                    continue
+                ws_tag = f"_w{win_val}_s{stride_val}"
+                mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+                fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+                feat_pairs = [
+                    ("S_v", "Std a_v"), ("R_impact", "Impact Ratio"),
+                    ("J_v", "Jerk (vertical)"), ("R_HF", "HF Energy Ratio"),
+                    ("E_w_h", "Horiz Gyro Energy"), ("step_freq", "Step Freq (Hz)"),
+                ]
+                for ax, (col, title) in zip(axes.flat, feat_pairs):
+                    if col in wf.columns:
+                        ax.plot(mid_t, wf[col], marker=".", markersize=2, linewidth=0.8)
+                    ax.set_title(title)
+                    ax.set_xlabel("elapsed_ms")
+                fig.suptitle(f"Window Features (win={win_val}s, stride={stride_val}s) — {label_str} ({parsed.filename})", fontsize=11)
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{base}_window_features{ws_tag}.png"), dpi=150)
+                plt.close(fig)
 
     # ── gyro_z rotation profile ──
     # 부드러운 좌우 회전 vs spike-like 패턴 확인용
@@ -721,29 +726,31 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
         fig.savefig(os.path.join(out_dir, f"{base}_gyro_z_rotation_profile.png"), dpi=150)
         plt.close(fig)
 
-    # ── window feature trends (gyro_z lateral rotation, stride 별) ──
-    if wf_map:
-        for stride_val, wf in wf_map.items():
-            if wf is None or wf.empty or "gyro_z_lateral_rotation_smoothness" not in wf.columns:
-                continue
-            stride_tag = f"_s{stride_val}"
-            mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
-            fig, axes = plt.subplots(2, 2, figsize=(14, 8))
-            gz_feat_pairs = [
-                ("gyro_z_rms", "Gyro-Z RMS (A_z)"),
-                ("gyro_z_low_high_ratio", "Low/High Freq Ratio (E_L/E_H)"),
-                ("gyro_z_kurtosis", "Gyro-Z Kurtosis (K_z)"),
-                ("gyro_z_lateral_rotation_smoothness", "F_LRS (Lateral Rotation Smoothness)"),
-            ]
-            for ax, (col, title) in zip(axes.flat, gz_feat_pairs):
-                if col in wf.columns:
-                    ax.plot(mid_t, wf[col], marker=".", markersize=2, linewidth=0.8)
-                ax.set_title(title, fontsize=9)
-                ax.set_xlabel("elapsed_ms")
-            fig.suptitle(f"Gyro-Z Rotation Features (stride={stride_val}s) — {label_str} ({parsed.filename})", fontsize=11)
-            fig.tight_layout()
-            fig.savefig(os.path.join(out_dir, f"{base}_window_feature_trends_gyroz{stride_tag}.png"), dpi=150)
-            plt.close(fig)
+    # ── window feature trends (gyro_z lateral rotation, window × stride 별) ──
+    if wf_grid:
+        for win_val in _WINDOWS:
+            for stride_val in _STRIDES:
+                wf = wf_grid.get((win_val, stride_val))
+                if wf is None or wf.empty or "gyro_z_lateral_rotation_smoothness" not in wf.columns:
+                    continue
+                ws_tag = f"_w{win_val}_s{stride_val}"
+                mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+                fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+                gz_feat_pairs = [
+                    ("gyro_z_rms", "Gyro-Z RMS (A_z)"),
+                    ("gyro_z_low_high_ratio", "Low/High Freq Ratio (E_L/E_H)"),
+                    ("gyro_z_kurtosis", "Gyro-Z Kurtosis (K_z)"),
+                    ("gyro_z_lateral_rotation_smoothness", "F_LRS (Lateral Rotation Smoothness)"),
+                ]
+                for ax, (col, title) in zip(axes.flat, gz_feat_pairs):
+                    if col in wf.columns:
+                        ax.plot(mid_t, wf[col], marker=".", markersize=2, linewidth=0.8)
+                    ax.set_title(title, fontsize=9)
+                    ax.set_xlabel("elapsed_ms")
+                fig.suptitle(f"Gyro-Z Rotation Features (win={win_val}s, stride={stride_val}s) — {label_str} ({parsed.filename})", fontsize=11)
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{base}_window_feature_trends_gyroz{ws_tag}.png"), dpi=150)
+                plt.close(fig)
 
 
 def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str):
@@ -919,88 +926,88 @@ def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str):
             fig.savefig(os.path.join(comp_dir, f"{col}_boxplot_by_label.png"), dpi=150)
             plt.close(fig)
 
-    # ── 윈도우 특징 비교 그래프 (stride 별) ──
+    # ── 윈도우 특징 비교 그래프 (window × stride 별) ──
+    _WINDOWS = [1.0, 1.5, 2.0, 3.0]
     _STRIDES = [0.5, 1.0, 1.5, 2.0]
-    for stride_val in _STRIDES:
-        stride_tag = f"_s{stride_val}"
-        wf_frames = []
-        for p in all_parsed:
-            wf_map = getattr(p, '_window_features_map', None)
-            if wf_map and stride_val in wf_map:
-                wf = wf_map[stride_val]
-            elif stride_val == 0.5:
-                wf = getattr(p, '_window_features', None)
-            else:
-                wf = None
-            if wf is not None and not wf.empty:
-                wfc = wf.copy()
-                wfc["_meta_label"] = p.header_metadata.get("label", "unknown")
-                wfc["_source_file"] = p.filename
-                wf_frames.append(wfc)
+    for win_val in _WINDOWS:
+        for stride_val in _STRIDES:
+            ws_tag = f"_w{win_val}_s{stride_val}"
+            wf_frames = []
+            for p in all_parsed:
+                wf_grid = getattr(p, '_wf_grid', None)
+                if wf_grid and (win_val, stride_val) in wf_grid:
+                    wf = wf_grid[(win_val, stride_val)]
+                else:
+                    wf = None
+                if wf is not None and not wf.empty:
+                    wfc = wf.copy()
+                    wfc["_meta_label"] = p.header_metadata.get("label", "unknown")
+                    wfc["_source_file"] = p.filename
+                    wf_frames.append(wfc)
 
-        if not wf_frames:
-            continue
-        wf_all = pd.concat(wf_frames, ignore_index=True)
-        wf_feats = [
-            ("S_v", "Std(a_v) per Window"),
-            ("R_impact", "Impact Ratio per Window"),
-            ("J_v", "Vertical Jerk per Window"),
-            ("R_HF", "HF Energy Ratio per Window"),
-            ("E_w_h", "Horiz Gyro Energy per Window"),
-            ("step_freq", "Step Frequency per Window"),
-        ]
-        for col, title in wf_feats:
-            if col not in wf_all.columns:
+            if not wf_frames:
                 continue
-            # boxplot
-            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
-            sns.boxplot(data=wf_all, x="_meta_label", y=col, ax=ax)
-            ax.set_xlabel("Label"); ax.set_ylabel(col)
-            ax.set_title(f"{title} (stride={stride_val}s) — Boxplot")
-            plt.xticks(rotation=30, ha="right")
-            fig.tight_layout()
-            fig.savefig(os.path.join(comp_dir, f"wf_{col}_boxplot{stride_tag}.png"), dpi=150)
-            plt.close(fig)
+            wf_all = pd.concat(wf_frames, ignore_index=True)
+            wf_feats = [
+                ("S_v", "Std(a_v) per Window"),
+                ("R_impact", "Impact Ratio per Window"),
+                ("J_v", "Vertical Jerk per Window"),
+                ("R_HF", "HF Energy Ratio per Window"),
+                ("E_w_h", "Horiz Gyro Energy per Window"),
+                ("step_freq", "Step Frequency per Window"),
+            ]
+            for col, title in wf_feats:
+                if col not in wf_all.columns:
+                    continue
+                # boxplot
+                fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+                sns.boxplot(data=wf_all, x="_meta_label", y=col, ax=ax)
+                ax.set_xlabel("Label"); ax.set_ylabel(col)
+                ax.set_title(f"{title} (win={win_val}s, stride={stride_val}s) — Boxplot")
+                plt.xticks(rotation=30, ha="right")
+                fig.tight_layout()
+                fig.savefig(os.path.join(comp_dir, f"wf_{col}_boxplot{ws_tag}.png"), dpi=150)
+                plt.close(fig)
 
-            # violin
-            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
-            sns.violinplot(data=wf_all, x="_meta_label", y=col, ax=ax, inner="quartile")
-            ax.set_xlabel("Label"); ax.set_ylabel(col)
-            ax.set_title(f"{title} (stride={stride_val}s) — Violin")
-            plt.xticks(rotation=30, ha="right")
-            fig.tight_layout()
-            fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin{stride_tag}.png"), dpi=150)
-            plt.close(fig)
+                # violin
+                fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+                sns.violinplot(data=wf_all, x="_meta_label", y=col, ax=ax, inner="quartile")
+                ax.set_xlabel("Label"); ax.set_ylabel(col)
+                ax.set_title(f"{title} (win={win_val}s, stride={stride_val}s) — Violin")
+                plt.xticks(rotation=30, ha="right")
+                fig.tight_layout()
+                fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin{ws_tag}.png"), dpi=150)
+                plt.close(fig)
 
-        # ── gyro_z Lateral Rotation Smoothness 관련 비교 (window 단위) ──
-        gz_wf_feats = [
-            ("gyro_z_lateral_rotation_smoothness", "Lateral Rotation Smoothness (F_LRS)"),
-            ("gyro_z_low_high_ratio", "Gyro-Z Low/High Freq Ratio"),
-            ("gyro_z_kurtosis", "Gyro-Z Kurtosis (spikiness)"),
-            ("gyro_z_rms", "Gyro-Z RMS (A_z)"),
-        ]
-        for col, title in gz_wf_feats:
-            if col not in wf_all.columns:
-                continue
-            # boxplot
-            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
-            sns.boxplot(data=wf_all, x="_meta_label", y=col, ax=ax)
-            ax.set_xlabel("Label"); ax.set_ylabel(col)
-            ax.set_title(f"{title} (stride={stride_val}s) — Boxplot")
-            plt.xticks(rotation=30, ha="right")
-            fig.tight_layout()
-            fig.savefig(os.path.join(comp_dir, f"wf_{col}_boxplot{stride_tag}.png"), dpi=150)
-            plt.close(fig)
+            # ── gyro_z Lateral Rotation Smoothness 관련 비교 (window 단위) ──
+            gz_wf_feats = [
+                ("gyro_z_lateral_rotation_smoothness", "Lateral Rotation Smoothness (F_LRS)"),
+                ("gyro_z_low_high_ratio", "Gyro-Z Low/High Freq Ratio"),
+                ("gyro_z_kurtosis", "Gyro-Z Kurtosis (spikiness)"),
+                ("gyro_z_rms", "Gyro-Z RMS (A_z)"),
+            ]
+            for col, title in gz_wf_feats:
+                if col not in wf_all.columns:
+                    continue
+                # boxplot
+                fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+                sns.boxplot(data=wf_all, x="_meta_label", y=col, ax=ax)
+                ax.set_xlabel("Label"); ax.set_ylabel(col)
+                ax.set_title(f"{title} (win={win_val}s, stride={stride_val}s) — Boxplot")
+                plt.xticks(rotation=30, ha="right")
+                fig.tight_layout()
+                fig.savefig(os.path.join(comp_dir, f"wf_{col}_boxplot{ws_tag}.png"), dpi=150)
+                plt.close(fig)
 
-            # violin
-            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
-            sns.violinplot(data=wf_all, x="_meta_label", y=col, ax=ax, inner="quartile")
-            ax.set_xlabel("Label"); ax.set_ylabel(col)
-            ax.set_title(f"{title} (stride={stride_val}s) — Violin")
-            plt.xticks(rotation=30, ha="right")
-            fig.tight_layout()
-            fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin{stride_tag}.png"), dpi=150)
-            plt.close(fig)
+                # violin
+                fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+                sns.violinplot(data=wf_all, x="_meta_label", y=col, ax=ax, inner="quartile")
+                ax.set_xlabel("Label"); ax.set_ylabel(col)
+                ax.set_title(f"{title} (win={win_val}s, stride={stride_val}s) — Violin")
+                plt.xticks(rotation=30, ha="right")
+                fig.tight_layout()
+                fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin{ws_tag}.png"), dpi=150)
+                plt.close(fig)
 
 
 # ──────────────────────────────────────────────
@@ -1244,17 +1251,28 @@ def generate_html_report(
 
 <!-- ═══════════════ 4. 라벨 비교 (인터랙티브) ═══════════════ -->
 <h2>4. 라벨 비교 분석</h2>
-<p style="color:#555;">아래에서 <strong>Stride</strong>를 선택한 뒤, 비교할 <strong>두 라벨</strong>과 각 라벨의 <strong>대표 파일</strong>을 선택하면,
-그래프를 좌/우 배치로 비교할 수 있습니다. Stride 변경 시 윈도우 기반 그래프만 갱신됩니다.</p>
+<p style="color:#555;">아래에서 <strong>Window</strong>와 <strong>Stride</strong>를 선택한 뒤, 비교할 <strong>두 라벨</strong>과 각 라벨의 <strong>대표 파일</strong>을 선택하면,
+그래프를 좌/우 배치로 비교할 수 있습니다. Window/Stride 변경 시 윈도우 기반 그래프만 갱신됩니다.</p>
 
-<div style="margin:12px 0;">
-  <label for="strideSelect" style="font-weight:700; font-size:1.05em; margin-right:10px;">Stride (sec):</label>
-  <select id="strideSelect" onchange="renderComparison()" style="padding:8px 16px; border-radius:6px; border:1px solid #ccc; font-size:1em; background:white;">
-    <option value="0.5" selected>0.5 s</option>
-    <option value="1.0">1.0 s</option>
-    <option value="1.5">1.5 s</option>
-    <option value="2.0">2.0 s</option>
-  </select>
+<div style="margin:12px 0; display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+  <div>
+    <label for="windowSelect" style="font-weight:700; font-size:1.05em; margin-right:10px;">Window (sec):</label>
+    <select id="windowSelect" onchange="renderComparison()" style="padding:8px 16px; border-radius:6px; border:1px solid #ccc; font-size:1em; background:white;">
+      <option value="1.0">1.0 s</option>
+      <option value="1.5">1.5 s</option>
+      <option value="2.0" selected>2.0 s</option>
+      <option value="3.0">3.0 s</option>
+    </select>
+  </div>
+  <div>
+    <label for="strideSelect" style="font-weight:700; font-size:1.05em; margin-right:10px;">Stride (sec):</label>
+    <select id="strideSelect" onchange="renderComparison()" style="padding:8px 16px; border-radius:6px; border:1px solid #ccc; font-size:1em; background:white;">
+      <option value="0.5" selected>0.5 s</option>
+      <option value="1.0">1.0 s</option>
+      <option value="1.5">1.5 s</option>
+      <option value="2.0">2.0 s</option>
+    </select>
+  </div>
 </div>
 
 <div class="compare-controls">
@@ -1335,6 +1353,7 @@ function renderComparison() {{
     const fileB = document.getElementById('fileB').value;
     const labelA = document.getElementById('labelA').value;
     const labelB = document.getElementById('labelB').value;
+    const winSize = document.getElementById('windowSelect').value;
     const stride = document.getElementById('strideSelect').value;
     const area = document.getElementById('comparison-area');
 
@@ -1345,9 +1364,9 @@ function renderComparison() {{
 
     let html = '';
     GRAPH_TYPES.forEach(gt => {{
-        // stride-dependent 그래프는 suffix에 _s{{stride}} 추가
-        const suffix = gt.strideDependent ? gt.suffix + '_s' + stride : gt.suffix;
-        const titleExtra = gt.strideDependent ? ' [stride=' + stride + 's]' : '';
+        // strideDependent 그래프는 suffix에 _w{{window}}_s{{stride}} 추가
+        const suffix = gt.strideDependent ? gt.suffix + '_w' + winSize + '_s' + stride : gt.suffix;
+        const titleExtra = gt.strideDependent ? ' [win=' + winSize + 's, stride=' + stride + 's]' : '';
 
         html += '<div class="graph-type-header">' + gt.title + titleExtra + '</div>';
         html += '<div class="compare-row">';
@@ -1449,18 +1468,24 @@ def main():
         else:
             parsed.dataframe = add_magnitude_columns(parsed.dataframe)
             parsed.dataframe = add_derived_signal_columns(parsed.dataframe, lpf_cutoff=args.lpf_cutoff)
-            # 윈도우 특징 (ParsedCSV에 임시 속성으로 첨부) — 여러 stride로 계산
+            # 윈도우 특징 (ParsedCSV에 임시 속성으로 첨부) — 여러 window × stride 조합
+            _WINDOWS = [1.0, 1.5, 2.0, 3.0]
             _STRIDES = [0.5, 1.0, 1.5, 2.0]
-            parsed._window_features_map = {}
-            for _s in _STRIDES:
-                parsed._window_features_map[_s] = compute_window_features(
-                    parsed.dataframe, window_sec=args.window_sec, stride_sec=_s)
-            # 기본 stride (하위 호환용)
-            parsed._window_features = parsed._window_features_map[_STRIDES[0]]
-            _win_counts = ', '.join(f's{_s}={len(parsed._window_features_map[_s])}' for _s in _STRIDES)
+            parsed._wf_grid = {}  # (window_sec, stride_sec) → DataFrame
+            for _w in _WINDOWS:
+                for _s in _STRIDES:
+                    parsed._wf_grid[(_w, _s)] = compute_window_features(
+                        parsed.dataframe, window_sec=_w, stride_sec=_s)
+            # 하위 호환용 aliases
+            parsed._window_features_map = {s: parsed._wf_grid[(2.0, s)] for s in _STRIDES}
+            parsed._window_features = parsed._wf_grid[(2.0, 0.5)]
+            _sample_counts = ', '.join(
+                f'w{_w}s{_s}={len(parsed._wf_grid[(_w, _s)])}'
+                for _w in _WINDOWS for _s in _STRIDES[:1]  # 로그는 대표 1개 stride만
+            )
             logger.info(f"  ✓ {parsed.filename}: {len(parsed.dataframe)} samples, "
                         f"label={parsed.header_metadata.get('label', '??')}, "
-                        f"windows=[{_win_counts}]")
+                        f"wins=[{_sample_counts}] (×{len(_STRIDES)} strides)")
         all_parsed.append(parsed)
 
     # ── Step 3: 품질 검사 + 통계 ──
@@ -1505,28 +1530,28 @@ def main():
     label_summary.to_csv(label_csv_path, index=False, encoding="utf-8-sig")
     logger.info(f"Label별 요약 → {label_csv_path}")
 
-    # ── Step 7-b: 윈도우 특징 CSV 저장 (stride 별) ──
+    # ── Step 7-b: 윈도우 특징 CSV 저장 (window × stride 별) ──
+    _WINDOWS = [1.0, 1.5, 2.0, 3.0]
     _STRIDES = [0.5, 1.0, 1.5, 2.0]
-    for stride_val in _STRIDES:
-        wf_rows = []
-        for p in all_parsed:
-            wf_map = getattr(p, '_window_features_map', None)
-            if wf_map and stride_val in wf_map:
-                wf = wf_map[stride_val]
-            elif stride_val == 0.5:
-                wf = getattr(p, '_window_features', None)
-            else:
-                wf = None
-            if wf is not None and not wf.empty:
-                wfc = wf.copy()
-                wfc.insert(0, "filename", p.filename)
-                wfc.insert(1, "label", p.header_metadata.get("label", "unknown"))
-                wf_rows.append(wfc)
-        if wf_rows:
-            wf_all = pd.concat(wf_rows, ignore_index=True)
-            wf_csv_path = os.path.join(out_dir, f"window_feature_summary_s{stride_val}.csv")
-            wf_all.to_csv(wf_csv_path, index=False, encoding="utf-8-sig")
-            logger.info(f"윈도우 특징 요약 (stride={stride_val}s) → {wf_csv_path}  ({len(wf_all)} windows)")
+    for win_val in _WINDOWS:
+        for stride_val in _STRIDES:
+            wf_rows = []
+            for p in all_parsed:
+                wf_grid = getattr(p, '_wf_grid', None)
+                if wf_grid and (win_val, stride_val) in wf_grid:
+                    wf = wf_grid[(win_val, stride_val)]
+                else:
+                    wf = None
+                if wf is not None and not wf.empty:
+                    wfc = wf.copy()
+                    wfc.insert(0, "filename", p.filename)
+                    wfc.insert(1, "label", p.header_metadata.get("label", "unknown"))
+                    wf_rows.append(wfc)
+            if wf_rows:
+                wf_all = pd.concat(wf_rows, ignore_index=True)
+                wf_csv_path = os.path.join(out_dir, f"window_feature_summary_w{win_val}_s{stride_val}.csv")
+                wf_all.to_csv(wf_csv_path, index=False, encoding="utf-8-sig")
+                logger.info(f"윈도우 특징 요약 (win={win_val}s, stride={stride_val}s) → {wf_csv_path}  ({len(wf_all)} windows)")
 
     # ── Step 8: HTML 리포트 ──
     logger.info("HTML 리포트 생성 중...")
