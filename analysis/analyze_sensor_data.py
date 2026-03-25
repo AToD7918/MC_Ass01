@@ -33,6 +33,13 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+# scipy는 Butterworth LPF에 사용 — 없으면 EMA fallback
+try:
+    from scipy.signal import butter, filtfilt
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
 warnings.filterwarnings("ignore", category=UserWarning)
 sns.set_theme(style="whitegrid", font_scale=0.9)
 
@@ -244,6 +251,241 @@ def add_magnitude_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ──────────────────────────────────────────────
+# 5-b. 파생 신호 (gravity, dynamic accel, V/H 분해)
+# ──────────────────────────────────────────────
+
+def estimate_sampling_rate(df: pd.DataFrame) -> float:
+    """elapsed_ms 열로부터 평균 샘플링 레이트(Hz)를 추정한다.
+    (전체 시간 범위 / 샘플 수 방식 — 중복 timestamp 행이 있어도 안정적)"""
+    if "elapsed_ms" not in df.columns or len(df) < 2:
+        return 100.0  # 기본값
+    total_ms = df["elapsed_ms"].iloc[-1] - df["elapsed_ms"].iloc[0]
+    if total_ms <= 0:
+        return 100.0
+    return (len(df) - 1) * 1000.0 / total_ms
+
+
+def _lowpass_butter(signal: np.ndarray, cutoff_hz: float, fs: float, order: int = 2) -> np.ndarray:
+    """Butterworth low-pass filter (scipy)."""
+    nyq = fs / 2.0
+    if cutoff_hz >= nyq:
+        cutoff_hz = nyq * 0.9
+    b, a = butter(order, cutoff_hz / nyq, btype="low")
+    return filtfilt(b, a, signal)
+
+
+def _lowpass_ema(signal: np.ndarray, alpha: float = 0.02) -> np.ndarray:
+    """Exponential moving average fallback (scipy 없을 때)."""
+    out = np.empty_like(signal)
+    out[0] = signal[0]
+    for i in range(1, len(signal)):
+        out[i] = alpha * signal[i] + (1 - alpha) * out[i - 1]
+    return out
+
+
+def add_derived_signal_columns(df: pd.DataFrame, lpf_cutoff: float = 0.3) -> pd.DataFrame:
+    """
+    파생 신호 열을 추가한다:
+      grav_x/y/z   – 중력 추정 (LPF)
+      dyn_x/y/z    – 동적 가속도 = acc - grav
+      dyn_mag      – 동적 가속도 크기
+      a_v          – 수직 동적 가속도 (중력 방향 투영)
+      a_h          – 수평 동적 가속도
+      w_v          – 수직 각속도
+      w_h          – 수평 각속도
+    """
+    acc_cols = ["acc_x", "acc_y", "acc_z"]
+    gyro_cols = ["gyro_x", "gyro_y", "gyro_z"]
+    if not all(c in df.columns for c in acc_cols):
+        return df
+
+    fs = estimate_sampling_rate(df)
+
+    # ── 중력 추정 (Low-pass filter) ──
+    for col, gcol in zip(acc_cols, ["grav_x", "grav_y", "grav_z"]):
+        sig = df[col].values.astype(float)
+        if HAS_SCIPY and len(sig) > 12:
+            df[gcol] = _lowpass_butter(sig, lpf_cutoff, fs)
+        else:
+            df[gcol] = _lowpass_ema(sig)
+
+    # ── 동적 가속도 ──
+    for ac, gc, dc in zip(acc_cols, ["grav_x", "grav_y", "grav_z"],
+                          ["dyn_x", "dyn_y", "dyn_z"]):
+        df[dc] = df[ac] - df[gc]
+
+    df["dyn_mag"] = np.sqrt(df["dyn_x"] ** 2 + df["dyn_y"] ** 2 + df["dyn_z"] ** 2)
+
+    # ── 중력 방향 단위벡터 ──
+    grav_mag = np.sqrt(df["grav_x"] ** 2 + df["grav_y"] ** 2 + df["grav_z"] ** 2)
+    grav_mag = grav_mag.replace(0, np.nan)
+    g_hat_x = df["grav_x"] / grav_mag
+    g_hat_y = df["grav_y"] / grav_mag
+    g_hat_z = df["grav_z"] / grav_mag
+
+    # ── 수직/수평 동적 가속도 분해 ──
+    df["a_v"] = df["dyn_x"] * g_hat_x + df["dyn_y"] * g_hat_y + df["dyn_z"] * g_hat_z
+    a_h_sq = df["dyn_mag"] ** 2 - df["a_v"] ** 2
+    df["a_h"] = np.sqrt(a_h_sq.clip(lower=0))
+
+    # ── 수직/수평 각속도 분해 ──
+    if all(c in df.columns for c in gyro_cols):
+        df["w_v"] = df["gyro_x"] * g_hat_x + df["gyro_y"] * g_hat_y + df["gyro_z"] * g_hat_z
+        w_h_sq = df["gyro_mag"] ** 2 - df["w_v"] ** 2 if "gyro_mag" in df.columns else (
+            df["gyro_x"] ** 2 + df["gyro_y"] ** 2 + df["gyro_z"] ** 2 - df["w_v"] ** 2)
+        df["w_h"] = np.sqrt(w_h_sq.clip(lower=0))
+
+    return df
+
+
+# ──────────────────────────────────────────────
+# 5-c. 윈도우 기반 특징 추출
+# ──────────────────────────────────────────────
+
+def compute_window_features(df: pd.DataFrame, window_sec: float = 2.0,
+                            stride_sec: float = 0.5) -> pd.DataFrame:
+    """
+    슬라이딩 윈도우로 특징을 추출한다.
+    Returns:
+        DataFrame — 윈도우 별 특징 (window_start_ms, window_end_ms, S_v, R_impact, J_v, R_HF, E_w_h, step_freq, ...)
+    """
+    if df is None or df.empty or "elapsed_ms" not in df.columns or "a_v" not in df.columns:
+        return pd.DataFrame()
+
+    fs = estimate_sampling_rate(df)
+    window_samples = max(int(window_sec * fs), 10)
+    stride_samples = max(int(stride_sec * fs), 1)
+
+    records = []
+    n = len(df)
+    start = 0
+    while start + window_samples <= n:
+        end = start + window_samples
+        w = df.iloc[start:end]
+        t0 = w["elapsed_ms"].iloc[0]
+        t1 = w["elapsed_ms"].iloc[-1]
+        av = w["a_v"].values.astype(float)
+        ah = w["a_h"].values.astype(float) if "a_h" in w.columns else np.zeros(len(w))
+
+        feat: Dict = {"window_start_ms": t0, "window_end_ms": t1}
+
+        # S_v : 수직 가속도 표준편차
+        feat["S_v"] = np.nanstd(av)
+
+        # R_impact : 충격 비대칭성 = max(a_v) / |min(a_v)| (min이 0이면 nan)
+        av_max = np.nanmax(av)
+        av_min = np.nanmin(av)
+        feat["R_impact"] = av_max / abs(av_min) if abs(av_min) > 1e-6 else np.nan
+
+        # J_v : 수직 저크 = mean(|d(a_v)/dt|)
+        dt_arr = w["elapsed_ms"].diff().iloc[1:].values / 1000.0  # seconds
+        dav = np.diff(av)
+        valid = dt_arr > 0
+        if valid.any():
+            feat["J_v"] = np.nanmean(np.abs(dav[valid] / dt_arr[valid]))
+        else:
+            feat["J_v"] = np.nan
+
+        # step_freq & R_HF : FFT 기반
+        if len(av) >= 8:
+            fft_vals = np.fft.rfft(av - np.nanmean(av))
+            power = np.abs(fft_vals) ** 2
+            freqs = np.fft.rfftfreq(len(av), d=1.0 / fs)
+
+            # step_freq: 0.5~4 Hz 범위에서 피크 주파수
+            walk_mask = (freqs >= 0.5) & (freqs <= 4.0)
+            if walk_mask.any():
+                peak_idx = np.argmax(power[walk_mask])
+                feat["step_freq"] = freqs[walk_mask][peak_idx]
+            else:
+                feat["step_freq"] = np.nan
+
+            # R_HF: 고주파(>3Hz) 에너지 / 전체 에너지
+            total_power = power[1:].sum()  # DC 제외
+            hf_mask = freqs[1:] > 3.0
+            feat["R_HF"] = power[1:][hf_mask].sum() / total_power if total_power > 0 else np.nan
+        else:
+            feat["step_freq"] = np.nan
+            feat["R_HF"] = np.nan
+
+        # E_w_h : 수평 각속도 에너지
+        if "w_h" in w.columns:
+            wh = w["w_h"].values.astype(float)
+            feat["E_w_h"] = np.nanmean(wh ** 2)
+        else:
+            feat["E_w_h"] = np.nan
+
+        # 보조 통계
+        feat["mean_a_v"] = np.nanmean(av)
+        feat["std_a_v"] = np.nanstd(av)
+        feat["mean_a_h"] = np.nanmean(ah)
+        feat["std_a_h"] = np.nanstd(ah)
+
+        # ────────────────────────────────────────────
+        # Lateral Rotation Smoothness Index (F_LRS)
+        # ────────────────────────────────────────────
+        # 목적: stairs_up(부드러운 좌우 회전) vs stairs_down(spike성 충격) 구분 보조
+        #   F_LRS = A_z * (E_L / (E_H + eps)) * (1 / (K_z + eps))
+        #   - 값이 클수록 부드럽고 지속적인 좌우 회전이 크며 spike 적음 → stairs_up 가능성
+        #   - 값이 작을수록 spike-like 고주파 충격 우세 → stairs_down 가능성
+        eps = 1e-10
+        if "gyro_z" in w.columns:
+            gz_raw = w["gyro_z"].values.astype(float)
+            N_gz = len(gz_raw)
+
+            # 1) 평균 제거된 gyro_z
+            gz_mean = np.nanmean(gz_raw)
+            gz_centered = gz_raw - gz_mean
+
+            # 2) 회전 진폭 RMS (A_z)
+            A_z = np.sqrt(np.nanmean(gz_centered ** 2))
+            feat["gyro_z_rms"] = A_z
+
+            # 3) 저주파/고주파 대역 에너지 (FFT magnitude^2 기반)
+            #    저주파 회전 대역: 0.3~2.0 Hz / 고주파 충격 대역: 3.0~8.0 Hz
+            if N_gz >= 8:
+                gz_fft = np.fft.rfft(gz_centered)
+                gz_power = np.abs(gz_fft) ** 2  # |FFT|^2 (spectral power)
+                gz_freqs = np.fft.rfftfreq(N_gz, d=1.0 / fs)
+
+                low_mask = (gz_freqs >= 0.3) & (gz_freqs <= 2.0)
+                high_mask = (gz_freqs >= 3.0) & (gz_freqs <= 8.0)
+
+                E_L = gz_power[low_mask].sum() if low_mask.any() else 0.0
+                E_H = gz_power[high_mask].sum() if high_mask.any() else 0.0
+            else:
+                E_L = 0.0
+                E_H = 0.0
+
+            feat["gyro_z_low_band_energy"] = E_L
+            feat["gyro_z_high_band_energy"] = E_H
+            feat["gyro_z_low_high_ratio"] = E_L / (E_H + eps)
+
+            # 4) Kurtosis (직접 계산: m4/m2^2)
+            #    K_z 가 크면 spike-like, 작으면 부드러운 진동
+            m2 = np.nanmean(gz_centered ** 2)
+            m4 = np.nanmean(gz_centered ** 4)
+            K_z = m4 / (m2 ** 2 + eps)
+            feat["gyro_z_kurtosis"] = K_z
+
+            # 5) 최종 F_LRS
+            F_LRS = A_z * (E_L / (E_H + eps)) * (1.0 / (K_z + eps))
+            feat["gyro_z_lateral_rotation_smoothness"] = F_LRS
+        else:
+            feat["gyro_z_rms"] = np.nan
+            feat["gyro_z_low_band_energy"] = np.nan
+            feat["gyro_z_high_band_energy"] = np.nan
+            feat["gyro_z_low_high_ratio"] = np.nan
+            feat["gyro_z_kurtosis"] = np.nan
+            feat["gyro_z_lateral_rotation_smoothness"] = np.nan
+
+        records.append(feat)
+        start += stride_samples
+
+    return pd.DataFrame(records)
+
+
 def compute_file_stats(parsed: ParsedCSV) -> Dict:
     """파일 하나에 대한 통계 딕셔너리."""
     df = parsed.dataframe
@@ -361,6 +603,136 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
         fig.savefig(os.path.join(out_dir, f"{base}_gyro_mag.png"), dpi=150)
         plt.close(fig)
 
+    # ── gravity xyz ──
+    if all(c in df.columns for c in ["grav_x", "grav_y", "grav_z"]):
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(time, df["grav_x"], label="grav_x", linewidth=0.7)
+        ax.plot(time, df["grav_y"], label="grav_y", linewidth=0.7)
+        ax.plot(time, df["grav_z"], label="grav_z", linewidth=0.7)
+        ax.set_xlabel("elapsed_ms")
+        ax.set_ylabel("Gravity (m/s²)")
+        ax.set_title(f"Gravity Estimation (LPF) — {label_str} ({parsed.filename})")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"{base}_gravity_xyz.png"), dpi=150)
+        plt.close(fig)
+
+    # ── dynamic acceleration xyz ──
+    if all(c in df.columns for c in ["dyn_x", "dyn_y", "dyn_z"]):
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(time, df["dyn_x"], label="dyn_x", linewidth=0.7)
+        ax.plot(time, df["dyn_y"], label="dyn_y", linewidth=0.7)
+        ax.plot(time, df["dyn_z"], label="dyn_z", linewidth=0.7)
+        ax.set_xlabel("elapsed_ms")
+        ax.set_ylabel("Dynamic Accel (m/s²)")
+        ax.set_title(f"Dynamic Acceleration — {label_str} ({parsed.filename})")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"{base}_dynamic_xyz.png"), dpi=150)
+        plt.close(fig)
+
+    # ── dynamic magnitude ──
+    if "dyn_mag" in df.columns:
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(time, df["dyn_mag"], color="tab:orange", linewidth=0.7)
+        ax.set_xlabel("elapsed_ms")
+        ax.set_ylabel("Dynamic Accel Magnitude (m/s²)")
+        ax.set_title(f"Dynamic Accel Magnitude — {label_str} ({parsed.filename})")
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"{base}_dyn_mag.png"), dpi=150)
+        plt.close(fig)
+
+    # ── vertical / horizontal accel ──
+    if "a_v" in df.columns and "a_h" in df.columns:
+        fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+        axes[0].plot(time, df["a_v"], color="tab:blue", linewidth=0.7)
+        axes[0].set_ylabel("a_v (m/s²)")
+        axes[0].set_title(f"Vertical Dynamic Accel — {label_str} ({parsed.filename})")
+        axes[1].plot(time, df["a_h"], color="tab:green", linewidth=0.7)
+        axes[1].set_ylabel("a_h (m/s²)")
+        axes[1].set_xlabel("elapsed_ms")
+        axes[1].set_title("Horizontal Dynamic Accel")
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"{base}_a_v_a_h.png"), dpi=150)
+        plt.close(fig)
+
+    # ── vertical / horizontal gyro ──
+    if "w_v" in df.columns and "w_h" in df.columns:
+        fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+        axes[0].plot(time, df["w_v"], color="tab:red", linewidth=0.7)
+        axes[0].set_ylabel("w_v (rad/s)")
+        axes[0].set_title(f"Vertical Angular Velocity — {label_str} ({parsed.filename})")
+        axes[1].plot(time, df["w_h"], color="tab:purple", linewidth=0.7)
+        axes[1].set_ylabel("w_h (rad/s)")
+        axes[1].set_xlabel("elapsed_ms")
+        axes[1].set_title("Horizontal Angular Velocity")
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"{base}_w_v_w_h.png"), dpi=150)
+        plt.close(fig)
+
+    # ── window feature trends ──
+    wf = parsed._window_features if hasattr(parsed, '_window_features') else None
+    if wf is not None and not wf.empty:
+        mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+        fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+        feat_pairs = [
+            ("S_v", "Std a_v"), ("R_impact", "Impact Ratio"),
+            ("J_v", "Jerk (vertical)"), ("R_HF", "HF Energy Ratio"),
+            ("E_w_h", "Horiz Gyro Energy"), ("step_freq", "Step Freq (Hz)"),
+        ]
+        for ax, (col, title) in zip(axes.flat, feat_pairs):
+            if col in wf.columns:
+                ax.plot(mid_t, wf[col], marker=".", markersize=2, linewidth=0.8)
+            ax.set_title(title)
+            ax.set_xlabel("elapsed_ms")
+        fig.suptitle(f"Window Features — {label_str} ({parsed.filename})", fontsize=11)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"{base}_window_features.png"), dpi=150)
+        plt.close(fig)
+
+    # ── gyro_z rotation profile ──
+    # 부드러운 좌우 회전 vs spike-like 패턴 확인용
+    if "gyro_z" in df.columns:
+        fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+        axes[0].plot(time, df["gyro_z"], color="tab:cyan", linewidth=0.5, alpha=0.7, label="raw gyro_z")
+        # rolling mean (약 0.5초 윈도우)
+        roll_n = max(int(estimate_sampling_rate(df) * 0.5), 3)
+        gz_smooth = df["gyro_z"].rolling(roll_n, center=True, min_periods=1).mean()
+        axes[0].plot(time, gz_smooth, color="tab:red", linewidth=1.2, label=f"rolling mean ({roll_n} samples)")
+        axes[0].set_ylabel("gyro_z (rad/s)")
+        axes[0].set_title(f"Gyro-Z: Smooth Lateral Rotation vs Spike Pattern — {label_str} ({parsed.filename})")
+        axes[0].legend(fontsize=8)
+
+        gz_centered = df["gyro_z"] - df["gyro_z"].mean()
+        axes[1].plot(time, gz_centered, color="tab:olive", linewidth=0.5, label="mean-centered gyro_z")
+        axes[1].axhline(0, color="gray", linewidth=0.5, linestyle="--")
+        axes[1].set_ylabel("centered gyro_z (rad/s)")
+        axes[1].set_xlabel("elapsed_ms")
+        axes[1].legend(fontsize=8)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"{base}_gyro_z_rotation_profile.png"), dpi=150)
+        plt.close(fig)
+
+    # ── window feature trends (gyro_z lateral rotation) ──
+    if wf is not None and not wf.empty and "gyro_z_lateral_rotation_smoothness" in wf.columns:
+        mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+        fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+        gz_feat_pairs = [
+            ("gyro_z_rms", "Gyro-Z RMS (A_z)"),
+            ("gyro_z_low_high_ratio", "Low/High Freq Ratio (E_L/E_H)"),
+            ("gyro_z_kurtosis", "Gyro-Z Kurtosis (K_z)"),
+            ("gyro_z_lateral_rotation_smoothness", "F_LRS (Lateral Rotation Smoothness)"),
+        ]
+        for ax, (col, title) in zip(axes.flat, gz_feat_pairs):
+            if col in wf.columns:
+                ax.plot(mid_t, wf[col], marker=".", markersize=2, linewidth=0.8)
+            ax.set_title(title, fontsize=9)
+            ax.set_xlabel("elapsed_ms")
+        fig.suptitle(f"Gyro-Z Rotation Features — {label_str} ({parsed.filename})", fontsize=11)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"{base}_window_feature_trends_gyroz.png"), dpi=150)
+        plt.close(fig)
+
 
 def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str):
     """label별 비교 그래프를 생성한다."""
@@ -381,9 +753,11 @@ def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str):
     comp_dir = os.path.join(out_dir, "comparative")
     os.makedirs(comp_dir, exist_ok=True)
 
+    _lbl_width = max(6, len(labels) * 1.5)
+
     # ── label별 acc_mag 분포 비교 (boxplot) ──
     if "acc_mag" in all_df.columns and len(labels) >= 1:
-        fig, ax = plt.subplots(figsize=(max(6, len(labels) * 1.5), 5))
+        fig, ax = plt.subplots(figsize=(_lbl_width, 5))
         sns.boxplot(data=all_df, x="_meta_label", y="acc_mag", ax=ax)
         ax.set_xlabel("Label")
         ax.set_ylabel("Acceleration magnitude (m/s²)")
@@ -515,6 +889,97 @@ def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str):
         fig.tight_layout()
         fig.savefig(os.path.join(comp_dir, "duration_and_samplecount.png"), dpi=150)
         plt.close(fig)
+
+    # ── label별 파생 신호 비교 (boxplot) ──
+    derived_cols = [
+        ("a_v", "Vertical Accel (a_v)", "m/s²"),
+        ("a_h", "Horizontal Accel (a_h)", "m/s²"),
+        ("dyn_mag", "Dynamic Accel Magnitude", "m/s²"),
+    ]
+    for col, title, unit in derived_cols:
+        if col in all_df.columns:
+            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+            sns.boxplot(data=all_df, x="_meta_label", y=col, ax=ax)
+            ax.set_xlabel("Label"); ax.set_ylabel(f"{title} ({unit})")
+            ax.set_title(f"{title} by Label")
+            plt.xticks(rotation=30, ha="right")
+            fig.tight_layout()
+            fig.savefig(os.path.join(comp_dir, f"{col}_boxplot_by_label.png"), dpi=150)
+            plt.close(fig)
+
+    # ── 윈도우 특징 비교 그래프 ──
+    wf_frames = []
+    for p in all_parsed:
+        wf = getattr(p, '_window_features', None)
+        if wf is not None and not wf.empty:
+            wfc = wf.copy()
+            wfc["_meta_label"] = p.header_metadata.get("label", "unknown")
+            wfc["_source_file"] = p.filename
+            wf_frames.append(wfc)
+
+    if wf_frames:
+        wf_all = pd.concat(wf_frames, ignore_index=True)
+        wf_feats = [
+            ("S_v", "Std(a_v) per Window"),
+            ("R_impact", "Impact Ratio per Window"),
+            ("J_v", "Vertical Jerk per Window"),
+            ("R_HF", "HF Energy Ratio per Window"),
+            ("E_w_h", "Horiz Gyro Energy per Window"),
+            ("step_freq", "Step Frequency per Window"),
+        ]
+        for col, title in wf_feats:
+            if col not in wf_all.columns:
+                continue
+            # boxplot
+            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+            sns.boxplot(data=wf_all, x="_meta_label", y=col, ax=ax)
+            ax.set_xlabel("Label"); ax.set_ylabel(col)
+            ax.set_title(f"{title} — Boxplot")
+            plt.xticks(rotation=30, ha="right")
+            fig.tight_layout()
+            fig.savefig(os.path.join(comp_dir, f"wf_{col}_boxplot.png"), dpi=150)
+            plt.close(fig)
+
+            # violin
+            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+            sns.violinplot(data=wf_all, x="_meta_label", y=col, ax=ax, inner="quartile")
+            ax.set_xlabel("Label"); ax.set_ylabel(col)
+            ax.set_title(f"{title} — Violin")
+            plt.xticks(rotation=30, ha="right")
+            fig.tight_layout()
+            fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin.png"), dpi=150)
+            plt.close(fig)
+
+        # ── gyro_z Lateral Rotation Smoothness 관련 비교 (window 단위) ──
+        # stairs_up: F_LRS 상대적으로 큼 (부드러운 회전), stairs_down: 상대적으로 작음 (spike 충격)
+        gz_wf_feats = [
+            ("gyro_z_lateral_rotation_smoothness", "Lateral Rotation Smoothness (F_LRS)"),
+            ("gyro_z_low_high_ratio", "Gyro-Z Low/High Freq Ratio"),
+            ("gyro_z_kurtosis", "Gyro-Z Kurtosis (spikiness)"),
+            ("gyro_z_rms", "Gyro-Z RMS (A_z)"),
+        ]
+        for col, title in gz_wf_feats:
+            if col not in wf_all.columns:
+                continue
+            # boxplot
+            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+            sns.boxplot(data=wf_all, x="_meta_label", y=col, ax=ax)
+            ax.set_xlabel("Label"); ax.set_ylabel(col)
+            ax.set_title(f"{title} — Boxplot")
+            plt.xticks(rotation=30, ha="right")
+            fig.tight_layout()
+            fig.savefig(os.path.join(comp_dir, f"wf_{col}_boxplot.png"), dpi=150)
+            plt.close(fig)
+
+            # violin
+            fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+            sns.violinplot(data=wf_all, x="_meta_label", y=col, ax=ax, inner="quartile")
+            ax.set_xlabel("Label"); ax.set_ylabel(col)
+            ax.set_title(f"{title} — Violin")
+            plt.xticks(rotation=30, ha="right")
+            fig.tight_layout()
+            fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin.png"), dpi=150)
+            plt.close(fig)
 
 
 # ──────────────────────────────────────────────
@@ -649,6 +1114,14 @@ def generate_html_report(
         {"suffix": "gyro_xyz", "title": "Gyroscope X / Y / Z"},
         {"suffix": "acc_mag",  "title": "Acceleration Magnitude"},
         {"suffix": "gyro_mag", "title": "Gyroscope Magnitude"},
+        {"suffix": "gravity_xyz", "title": "Gravity Estimation (LPF)"},
+        {"suffix": "dynamic_xyz", "title": "Dynamic Acceleration X / Y / Z"},
+        {"suffix": "dyn_mag",  "title": "Dynamic Accel Magnitude"},
+        {"suffix": "a_v_a_h",  "title": "Vertical / Horizontal Accel"},
+        {"suffix": "w_v_w_h",  "title": "Vertical / Horizontal Gyro"},
+        {"suffix": "window_features", "title": "Window Feature Trends"},
+        {"suffix": "gyro_z_rotation_profile", "title": "Gyro-Z Rotation Profile"},
+        {"suffix": "window_feature_trends_gyroz", "title": "Gyro-Z Rotation Features (Window)"},
     ])
 
     html = f"""<!DOCTYPE html>
@@ -900,6 +1373,12 @@ def main():
                         help="분석 결과 출력 디렉토리 (기본: ../analysis_output)")
     parser.add_argument("--skip-graphs", action="store_true",
                         help="그래프 생성을 건너뛰고 요약/리포트만 재생성")
+    parser.add_argument("--window-sec", type=float, default=2.0,
+                        help="윈도우 특징 추출 윈도우 길이 (초, 기본: 2.0)")
+    parser.add_argument("--stride-sec", type=float, default=0.5,
+                        help="윈도우 특징 추출 stride (초, 기본: 0.5)")
+    parser.add_argument("--lpf-cutoff", type=float, default=0.3,
+                        help="중력 추정 LPF 차단 주파수 (Hz, 기본: 0.3)")
     args = parser.parse_args()
 
     data_dir = os.path.abspath(args.data_dir)
@@ -924,7 +1403,7 @@ def main():
         logger.warning("CSV 파일이 없습니다. data 폴더를 확인하세요.")
         return
 
-    # ── Step 2: 파싱 ──
+    # ── Step 2: 파싱 + magnitude + 파생 신호 + 윈도우 특징 ──
     all_parsed: List[ParsedCSV] = []
     for fp in csv_files:
         logger.info(f"파싱 중: {fp}")
@@ -932,10 +1411,14 @@ def main():
         if parsed.parse_error:
             logger.warning(f"  ⚠ {parsed.filename}: {parsed.parse_error}")
         else:
-            # magnitude 열 추가
             parsed.dataframe = add_magnitude_columns(parsed.dataframe)
+            parsed.dataframe = add_derived_signal_columns(parsed.dataframe, lpf_cutoff=args.lpf_cutoff)
+            # 윈도우 특징 (ParsedCSV에 임시 속성으로 첨부)
+            parsed._window_features = compute_window_features(
+                parsed.dataframe, window_sec=args.window_sec, stride_sec=args.stride_sec)
             logger.info(f"  ✓ {parsed.filename}: {len(parsed.dataframe)} samples, "
-                        f"label={parsed.header_metadata.get('label', '??')}")
+                        f"label={parsed.header_metadata.get('label', '??')}, "
+                        f"windows={len(parsed._window_features)}")
         all_parsed.append(parsed)
 
     # ── Step 3: 품질 검사 + 통계 ──
@@ -979,6 +1462,21 @@ def main():
     label_csv_path = os.path.join(out_dir, "label_summary.csv")
     label_summary.to_csv(label_csv_path, index=False, encoding="utf-8-sig")
     logger.info(f"Label별 요약 → {label_csv_path}")
+
+    # ── Step 7-b: 윈도우 특징 CSV 저장 ──
+    wf_rows = []
+    for p in all_parsed:
+        wf = getattr(p, '_window_features', None)
+        if wf is not None and not wf.empty:
+            wfc = wf.copy()
+            wfc.insert(0, "filename", p.filename)
+            wfc.insert(1, "label", p.header_metadata.get("label", "unknown"))
+            wf_rows.append(wfc)
+    if wf_rows:
+        wf_all = pd.concat(wf_rows, ignore_index=True)
+        wf_csv_path = os.path.join(out_dir, "window_feature_summary.csv")
+        wf_all.to_csv(wf_csv_path, index=False, encoding="utf-8-sig")
+        logger.info(f"윈도우 특징 요약 → {wf_csv_path}  ({len(wf_all)} windows)")
 
     # ── Step 8: HTML 리포트 ──
     logger.info("HTML 리포트 생성 중...")
