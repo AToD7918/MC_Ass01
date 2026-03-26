@@ -30,6 +30,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ActivityRecognitionActivity"
+            android:screenOrientation="portrait"
+            android:label="Activity Recognition"
+            android:theme="@style/Theme.MyApplication" />
     </application>
 
 </manifest>

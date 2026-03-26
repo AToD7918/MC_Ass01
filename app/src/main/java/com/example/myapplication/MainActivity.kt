@@ -357,6 +357,18 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     Text("Stop")
                 }
             }
+
+            HorizontalDivider()
+
+            // Activity Recognition 화면으로 이동
+            OutlinedButton(
+                onClick = {
+                    startActivity(Intent(this@MainActivity, ActivityRecognitionActivity::class.java))
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Go to Activity Recognition")
+            }
         }
     }
 
