@@ -422,6 +422,31 @@ def compute_window_features(df: pd.DataFrame, window_sec: float = 2.0,
         feat["mean_a_h"] = np.nanmean(ah)
         feat["std_a_h"] = np.nanstd(ah)
 
+        # acc_mag / gyro_mag 윈도우 통계
+        if "acc_mag" in w.columns:
+            am = w["acc_mag"].values.astype(float)
+            feat["acc_mag_mean"] = np.nanmean(am)
+            feat["acc_mag_std"] = np.nanstd(am)
+        else:
+            feat["acc_mag_mean"] = np.nan
+            feat["acc_mag_std"] = np.nan
+
+        if "gyro_mag" in w.columns:
+            gm = w["gyro_mag"].values.astype(float)
+            feat["gyro_mag_mean"] = np.nanmean(gm)
+            feat["gyro_mag_std"] = np.nanstd(gm)
+        else:
+            feat["gyro_mag_mean"] = np.nan
+            feat["gyro_mag_std"] = np.nan
+
+        # zero-crossing count (acc_mag 기준, 평균 기준선)
+        if "acc_mag" in w.columns:
+            am = w["acc_mag"].values.astype(float)
+            am_centered = am - np.nanmean(am)
+            feat["zero_crossing_count"] = int(np.sum(np.diff(np.sign(am_centered)) != 0))
+        else:
+            feat["zero_crossing_count"] = 0
+
         # ────────────────────────────────────────────
         # Lateral Rotation Smoothness Index (F_LRS)
         # ────────────────────────────────────────────
@@ -603,6 +628,57 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
         fig.savefig(os.path.join(out_dir, f"{base}_gyro_mag.png"), dpi=150)
         plt.close(fig)
 
+    # ── wf_grid 초기화 (윈도우 기반 그래프 공통) ──
+    _WINDOWS = [1.0, 1.5, 2.0, 3.0]
+    _STRIDES = [0.5, 1.0, 1.5, 2.0]
+    wf_grid = getattr(parsed, '_wf_grid', None)
+    if wf_grid is None:
+        wf_map = getattr(parsed, '_window_features_map', None)
+        if wf_map:
+            wf_grid = {(2.0, s): v for s, v in wf_map.items()}
+
+    # ── acc_mag window mean & std (stride-dependent) ──
+    if wf_grid:
+        for win_val in _WINDOWS:
+            for stride_val in _STRIDES:
+                wf = wf_grid.get((win_val, stride_val))
+                if wf is None or wf.empty or "acc_mag_mean" not in wf.columns:
+                    continue
+                ws_tag = f"_w{win_val}_s{stride_val}"
+                mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+                fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+                axes[0].plot(mid_t, wf["acc_mag_mean"], marker=".", markersize=2, linewidth=0.8, color="tab:red")
+                axes[0].set_ylabel("Acc Mag Mean (m/s²)")
+                axes[0].set_title(f"Window Acc-Mag Mean (win={win_val}s, stride={stride_val}s) — {label_str} ({parsed.filename})")
+                axes[1].plot(mid_t, wf["acc_mag_std"], marker=".", markersize=2, linewidth=0.8, color="tab:orange")
+                axes[1].set_ylabel("Acc Mag Std (m/s²)")
+                axes[1].set_xlabel("elapsed_ms")
+                axes[1].set_title("Window Acc-Mag Std")
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{base}_acc_mag_window{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
+    # ── gyro_mag window mean & std (stride-dependent) ──
+    if wf_grid:
+        for win_val in _WINDOWS:
+            for stride_val in _STRIDES:
+                wf = wf_grid.get((win_val, stride_val))
+                if wf is None or wf.empty or "gyro_mag_mean" not in wf.columns:
+                    continue
+                ws_tag = f"_w{win_val}_s{stride_val}"
+                mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+                fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+                axes[0].plot(mid_t, wf["gyro_mag_mean"], marker=".", markersize=2, linewidth=0.8, color="tab:purple")
+                axes[0].set_ylabel("Gyro Mag Mean (rad/s)")
+                axes[0].set_title(f"Window Gyro-Mag Mean (win={win_val}s, stride={stride_val}s) — {label_str} ({parsed.filename})")
+                axes[1].plot(mid_t, wf["gyro_mag_std"], marker=".", markersize=2, linewidth=0.8, color="tab:cyan")
+                axes[1].set_ylabel("Gyro Mag Std (rad/s)")
+                axes[1].set_xlabel("elapsed_ms")
+                axes[1].set_title("Window Gyro-Mag Std")
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{base}_gyro_mag_window{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
     # ── gravity xyz ──
     if all(c in df.columns for c in ["grav_x", "grav_y", "grav_z"]):
         fig, ax = plt.subplots(figsize=(12, 4))
@@ -671,14 +747,6 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
         plt.close(fig)
 
     # ── window feature trends (window × stride 별) ──
-    _WINDOWS = [1.0, 1.5, 2.0, 3.0]
-    _STRIDES = [0.5, 1.0, 1.5, 2.0]
-    wf_grid = getattr(parsed, '_wf_grid', None)
-    if wf_grid is None:
-        # fallback: 기존 _window_features_map 사용
-        wf_map = getattr(parsed, '_window_features_map', None)
-        if wf_map:
-            wf_grid = {(2.0, s): v for s, v in wf_map.items()}
     if wf_grid:
         for win_val in _WINDOWS:
             for stride_val in _STRIDES:
@@ -701,6 +769,42 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
                 fig.suptitle(f"Window Features (win={win_val}s, stride={stride_val}s) — {label_str} ({parsed.filename})", fontsize=11)
                 fig.tight_layout()
                 fig.savefig(os.path.join(out_dir, f"{base}_window_features{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
+    # ── E_w_h (Horizontal Gyro Energy) trends (stride-dependent) ──
+    if wf_grid:
+        for win_val in _WINDOWS:
+            for stride_val in _STRIDES:
+                wf = wf_grid.get((win_val, stride_val))
+                if wf is None or wf.empty or "E_w_h" not in wf.columns:
+                    continue
+                ws_tag = f"_w{win_val}_s{stride_val}"
+                mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+                fig, ax = plt.subplots(figsize=(12, 4))
+                ax.plot(mid_t, wf["E_w_h"], marker=".", markersize=2, linewidth=0.8, color="tab:green")
+                ax.set_xlabel("elapsed_ms")
+                ax.set_ylabel("E_w_h (Horiz Gyro Energy)")
+                ax.set_title(f"Horizontal Gyro Energy (win={win_val}s, stride={stride_val}s) — {label_str} ({parsed.filename})")
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{base}_ewh_trend{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
+    # ── zero-crossing count trends (stride-dependent) ──
+    if wf_grid:
+        for win_val in _WINDOWS:
+            for stride_val in _STRIDES:
+                wf = wf_grid.get((win_val, stride_val))
+                if wf is None or wf.empty or "zero_crossing_count" not in wf.columns:
+                    continue
+                ws_tag = f"_w{win_val}_s{stride_val}"
+                mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+                fig, ax = plt.subplots(figsize=(12, 4))
+                ax.plot(mid_t, wf["zero_crossing_count"], marker=".", markersize=2, linewidth=0.8, color="tab:brown")
+                ax.set_xlabel("elapsed_ms")
+                ax.set_ylabel("Zero-Crossing Count")
+                ax.set_title(f"Zero-Crossing Count (win={win_val}s, stride={stride_val}s) — {label_str} ({parsed.filename})")
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{base}_zero_crossing{ws_tag}.png"), dpi=150)
                 plt.close(fig)
 
     # ── gyro_z rotation profile ──
@@ -1141,13 +1245,17 @@ def generate_html_report(
         {"suffix": "acc_xyz",  "title": "Accelerometer X / Y / Z"},
         {"suffix": "gyro_xyz", "title": "Gyroscope X / Y / Z"},
         {"suffix": "acc_mag",  "title": "Acceleration Magnitude"},
+        {"suffix": "acc_mag_window", "title": "Acc-Mag Window Mean & Std", "strideDependent": True},
         {"suffix": "gyro_mag", "title": "Gyroscope Magnitude"},
+        {"suffix": "gyro_mag_window", "title": "Gyro-Mag Window Mean & Std", "strideDependent": True},
         {"suffix": "gravity_xyz", "title": "Gravity Estimation (LPF)"},
         {"suffix": "dynamic_xyz", "title": "Dynamic Acceleration X / Y / Z"},
         {"suffix": "dyn_mag",  "title": "Dynamic Accel Magnitude"},
         {"suffix": "a_v_a_h",  "title": "Vertical / Horizontal Accel"},
         {"suffix": "w_v_w_h",  "title": "Vertical / Horizontal Gyro"},
         {"suffix": "window_features", "title": "Window Feature Trends", "strideDependent": True},
+        {"suffix": "ewh_trend", "title": "Horizontal Gyro Energy (E_w_h) Trend", "strideDependent": True},
+        {"suffix": "zero_crossing", "title": "Zero-Crossing Count Trend", "strideDependent": True},
         {"suffix": "gyro_z_rotation_profile", "title": "Gyro-Z Rotation Profile"},
         {"suffix": "window_feature_trends_gyroz", "title": "Gyro-Z Rotation Features (Window)", "strideDependent": True},
     ])
