@@ -408,9 +408,9 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
 
     private fun classify(f: Features): String {
         // 1. STANDING: 모든 센서가 거의 정지 상태
-        //     Acc_Mag std < 1.5 && Gyro_Mag std < 1 && std A_v < 1 && Jerk < 30
+        //     Acc_Mag std < 1.5 && Gyro_Mag std < 1 && std A_v < 1 && Jerk < 40
 
-        if (f.accMagStd < 1.5 && f.gyroMagStd < 1 && f.stdAv < 1 && f.jerk < 30) {
+        if (f.accMagStd < 1.5 && f.gyroMagStd < 1 && f.stdAv < 1 && f.jerk < 40) {
             return "STANDING"
         }
         // 2. RUNNING: 높은 주파수, 높은 가속/자이로 변동
