@@ -448,6 +448,19 @@ def compute_window_features(df: pd.DataFrame, window_sec: float = 2.0,
             feat["zero_crossing_count"] = 0
 
         # ────────────────────────────────────────────
+        # Acc-X Bipolar Amplitude
+        # ────────────────────────────────────────────
+        # waving처럼 하나의 window 안에서 x축에 큰 positive peak와
+        # 큰 negative peak가 함께 나타나는 양방향 왕복 패턴을 잡기 위한 feature.
+        # min(max(acc_x), abs(min(acc_x))) — 한쪽만 크게 튄 경우 값이 작고,
+        # 양방향 모두 크게 흔들려야 값이 커지는 구조.
+        if "acc_x" in w.columns:
+            acc_x_vals = w["acc_x"].values.astype(float)
+            feat["acc_x_bipolar_amplitude"] = min(np.nanmax(acc_x_vals), abs(np.nanmin(acc_x_vals)))
+        else:
+            feat["acc_x_bipolar_amplitude"] = np.nan
+
+        # ────────────────────────────────────────────
         # Lateral Rotation Smoothness Index (F_LRS)
         # ────────────────────────────────────────────
         # 목적: stairs_up(부드러운 좌우 회전) vs stairs_down(spike성 충격) 구분 보조
@@ -504,6 +517,19 @@ def compute_window_features(df: pd.DataFrame, window_sec: float = 2.0,
             feat["gyro_z_low_high_ratio"] = np.nan
             feat["gyro_z_kurtosis"] = np.nan
             feat["gyro_z_lateral_rotation_smoothness"] = np.nan
+
+        # ────────────────────────────────────────────
+        # Gyro-Z Bipolar Amplitude
+        # ────────────────────────────────────────────
+        # waving처럼 하나의 window 안에서 gyro_z에 큰 positive peak와
+        # 큰 negative peak가 함께 나타나는 양방향 회전 왕복 패턴을 잡기 위한 feature.
+        # min(max(gyro_z), abs(min(gyro_z))) — 한쪽 방향 회전만 클 경우 값이 작고,
+        # 양방향 모두 크게 회전해야 값이 커지는 구조.
+        if "gyro_z" in w.columns:
+            gz_vals = w["gyro_z"].values.astype(float)
+            feat["gyro_z_bipolar_amplitude"] = min(np.nanmax(gz_vals), abs(np.nanmin(gz_vals)))
+        else:
+            feat["gyro_z_bipolar_amplitude"] = np.nan
 
         records.append(feat)
         start += stride_samples
@@ -566,7 +592,7 @@ def build_file_summary(parsed: ParsedCSV, quality: Dict, stats: Dict) -> Dict:
 # 6. 그래프 생성
 # ──────────────────────────────────────────────
 
-def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
+def plot_file_graphs(parsed: ParsedCSV, out_dir: str, skip_existing: bool = True):
     """파일 하나에 대해 4개 그래프를 저장한다."""
     df = parsed.dataframe
     if df is None or df.empty or "elapsed_ms" not in df.columns:
@@ -576,12 +602,22 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
     base = os.path.splitext(parsed.filename)[0]
     label_str = parsed.header_metadata.get("label", "unknown")
 
+    # 이미 생성된 그래프가 있으면 건너뛴다 (단, 새 유형이 누락된 경우 재생성)
+    if skip_existing:
+        existing = [f for f in os.listdir(out_dir) if f.startswith(base + "_") and f.endswith(".png")]
+        # 필수 그래프 유형이 모두 존재하는지 확인
+        _required_suffixes = ["acc_xyz", "gyro_z_bipolar_w2.0_s0.5", "acc_x_bipolar_w2.0_s0.5"]
+        all_present = all(any(f"{base}_{s}.png" == ef for ef in existing) for s in _required_suffixes)
+        if existing and all_present:
+            logger.info(f"  → {parsed.filename}: {len(existing)} graphs already exist, skipping")
+            return
+
     # ── accelerometer xyz ──
     if all(c in df.columns for c in ["acc_x", "acc_y", "acc_z"]):
         fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(time, df["acc_x"], label="acc_x", linewidth=0.7)
-        ax.plot(time, df["acc_y"], label="acc_y", linewidth=0.7)
-        ax.plot(time, df["acc_z"], label="acc_z", linewidth=0.7)
+        ax.plot(time, df["acc_x"], label="acc_x", linewidth=0.7, color="red")
+        ax.plot(time, df["acc_y"], label="acc_y", linewidth=0.7, color="green")
+        ax.plot(time, df["acc_z"], label="acc_z", linewidth=0.7, color="blue")
         ax.set_xlabel("elapsed_ms")
         ax.set_ylabel("Acceleration (m/s²)")
         ax.set_title(f"Accelerometer — {label_str} ({parsed.filename})")
@@ -593,9 +629,9 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
     # ── gyroscope xyz ──
     if all(c in df.columns for c in ["gyro_x", "gyro_y", "gyro_z"]):
         fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(time, df["gyro_x"], label="gyro_x", linewidth=0.7)
-        ax.plot(time, df["gyro_y"], label="gyro_y", linewidth=0.7)
-        ax.plot(time, df["gyro_z"], label="gyro_z", linewidth=0.7)
+        ax.plot(time, df["gyro_x"], label="gyro_x", linewidth=0.7, color="red")
+        ax.plot(time, df["gyro_y"], label="gyro_y", linewidth=0.7, color="green")
+        ax.plot(time, df["gyro_z"], label="gyro_z", linewidth=0.7, color="blue")
         ax.set_xlabel("elapsed_ms")
         ax.set_ylabel("Angular velocity (rad/s)")
         ax.set_title(f"Gyroscope — {label_str} ({parsed.filename})")
@@ -682,9 +718,9 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
     # ── gravity xyz ──
     if all(c in df.columns for c in ["grav_x", "grav_y", "grav_z"]):
         fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(time, df["grav_x"], label="grav_x", linewidth=0.7)
-        ax.plot(time, df["grav_y"], label="grav_y", linewidth=0.7)
-        ax.plot(time, df["grav_z"], label="grav_z", linewidth=0.7)
+        ax.plot(time, df["grav_x"], label="grav_x", linewidth=0.7, color="red")
+        ax.plot(time, df["grav_y"], label="grav_y", linewidth=0.7, color="green")
+        ax.plot(time, df["grav_z"], label="grav_z", linewidth=0.7, color="blue")
         ax.set_xlabel("elapsed_ms")
         ax.set_ylabel("Gravity (m/s²)")
         ax.set_title(f"Gravity Estimation (LPF) — {label_str} ({parsed.filename})")
@@ -696,9 +732,9 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
     # ── dynamic acceleration xyz ──
     if all(c in df.columns for c in ["dyn_x", "dyn_y", "dyn_z"]):
         fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(time, df["dyn_x"], label="dyn_x", linewidth=0.7)
-        ax.plot(time, df["dyn_y"], label="dyn_y", linewidth=0.7)
-        ax.plot(time, df["dyn_z"], label="dyn_z", linewidth=0.7)
+        ax.plot(time, df["dyn_x"], label="dyn_x", linewidth=0.7, color="red")
+        ax.plot(time, df["dyn_y"], label="dyn_y", linewidth=0.7, color="green")
+        ax.plot(time, df["dyn_z"], label="dyn_z", linewidth=0.7, color="blue")
         ax.set_xlabel("elapsed_ms")
         ax.set_ylabel("Dynamic Accel (m/s²)")
         ax.set_title(f"Dynamic Acceleration — {label_str} ({parsed.filename})")
@@ -830,6 +866,42 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
         fig.savefig(os.path.join(out_dir, f"{base}_gyro_z_rotation_profile.png"), dpi=150)
         plt.close(fig)
 
+    # ── acc_x_bipolar_amplitude trends (stride-dependent) ──
+    if wf_grid:
+        for win_val in _WINDOWS:
+            for stride_val in _STRIDES:
+                wf = wf_grid.get((win_val, stride_val))
+                if wf is None or wf.empty or "acc_x_bipolar_amplitude" not in wf.columns:
+                    continue
+                ws_tag = f"_w{win_val}_s{stride_val}"
+                mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+                fig, ax = plt.subplots(figsize=(12, 4))
+                ax.plot(mid_t, wf["acc_x_bipolar_amplitude"], marker=".", markersize=2, linewidth=0.8, color="tab:pink")
+                ax.set_xlabel("elapsed_ms")
+                ax.set_ylabel("Acc-X Bipolar Amplitude (m/s²)")
+                ax.set_title(f"Acc-X Bipolar Amplitude (win={win_val}s, stride={stride_val}s) — {label_str} ({parsed.filename})")
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{base}_acc_x_bipolar{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
+    # ── gyro_z_bipolar_amplitude trends (stride-dependent) ──
+    if wf_grid:
+        for win_val in _WINDOWS:
+            for stride_val in _STRIDES:
+                wf = wf_grid.get((win_val, stride_val))
+                if wf is None or wf.empty or "gyro_z_bipolar_amplitude" not in wf.columns:
+                    continue
+                ws_tag = f"_w{win_val}_s{stride_val}"
+                mid_t = (wf["window_start_ms"] + wf["window_end_ms"]) / 2
+                fig, ax = plt.subplots(figsize=(12, 4))
+                ax.plot(mid_t, wf["gyro_z_bipolar_amplitude"], marker=".", markersize=2, linewidth=0.8, color="tab:olive")
+                ax.set_xlabel("elapsed_ms")
+                ax.set_ylabel("Gyro-Z Bipolar Amplitude (rad/s)")
+                ax.set_title(f"Gyro-Z Bipolar Amplitude (win={win_val}s, stride={stride_val}s) \u2014 {label_str} ({parsed.filename})")
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{base}_gyro_z_bipolar{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
     # ── window feature trends (gyro_z lateral rotation, window × stride 별) ──
     if wf_grid:
         for win_val in _WINDOWS:
@@ -857,7 +929,7 @@ def plot_file_graphs(parsed: ParsedCSV, out_dir: str):
                 plt.close(fig)
 
 
-def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str):
+def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str, skip_existing: bool = True):
     """label별 비교 그래프를 생성한다."""
     # label별 전체 데이터 결합
     frames = []
@@ -875,6 +947,15 @@ def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str):
     labels = sorted(all_df["_meta_label"].unique())
     comp_dir = os.path.join(out_dir, "comparative")
     os.makedirs(comp_dir, exist_ok=True)
+
+    # 이미 비교 그래프가 존재하면 건너뛴다 (단, 새 유형이 누락된 경우 재생성)
+    if skip_existing:
+        existing = [f for f in os.listdir(comp_dir) if f.endswith(".png")]
+        _required_comp = ["wf_gyro_z_bipolar_amplitude_boxplot_w2.0_s0.5.png"]
+        all_comp_present = all(ef in existing for ef in _required_comp)
+        if existing and all_comp_present:
+            logger.info(f"  → 비교 그래프 {len(existing)}개 이미 존재, skipping")
+            return
 
     _lbl_width = max(6, len(labels) * 1.5)
 
@@ -1083,6 +1164,60 @@ def plot_comparative_graphs(all_parsed: List[ParsedCSV], out_dir: str):
                 fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin{ws_tag}.png"), dpi=150)
                 plt.close(fig)
 
+            # ── acc_x_bipolar_amplitude 비교 (window 단위) ──
+            bipolar_feats = [
+                ("acc_x_bipolar_amplitude", "Acc-X Bipolar Amplitude per Window"),
+            ]
+            for col, title in bipolar_feats:
+                if col not in wf_all.columns:
+                    continue
+                # boxplot
+                fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+                sns.boxplot(data=wf_all, x="_meta_label", y=col, ax=ax)
+                ax.set_xlabel("Label"); ax.set_ylabel(col)
+                ax.set_title(f"{title} (win={win_val}s, stride={stride_val}s) — Boxplot")
+                plt.xticks(rotation=30, ha="right")
+                fig.tight_layout()
+                fig.savefig(os.path.join(comp_dir, f"wf_{col}_boxplot{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
+                # violin
+                fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+                sns.violinplot(data=wf_all, x="_meta_label", y=col, ax=ax, inner="quartile")
+                ax.set_xlabel("Label"); ax.set_ylabel(col)
+                ax.set_title(f"{title} (win={win_val}s, stride={stride_val}s) — Violin")
+                plt.xticks(rotation=30, ha="right")
+                fig.tight_layout()
+                fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
+            # ── gyro_z_bipolar_amplitude 비교 (window 단위) ──
+            gz_bipolar_feats = [
+                ("gyro_z_bipolar_amplitude", "Gyro-Z Bipolar Amplitude per Window"),
+            ]
+            for col, title in gz_bipolar_feats:
+                if col not in wf_all.columns:
+                    continue
+                # boxplot
+                fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+                sns.boxplot(data=wf_all, x="_meta_label", y=col, ax=ax)
+                ax.set_xlabel("Label"); ax.set_ylabel(col)
+                ax.set_title(f"{title} (win={win_val}s, stride={stride_val}s) \u2014 Boxplot")
+                plt.xticks(rotation=30, ha="right")
+                fig.tight_layout()
+                fig.savefig(os.path.join(comp_dir, f"wf_{col}_boxplot{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
+                # violin
+                fig, ax = plt.subplots(figsize=(_lbl_width, 5))
+                sns.violinplot(data=wf_all, x="_meta_label", y=col, ax=ax, inner="quartile")
+                ax.set_xlabel("Label"); ax.set_ylabel(col)
+                ax.set_title(f"{title} (win={win_val}s, stride={stride_val}s) \u2014 Violin")
+                plt.xticks(rotation=30, ha="right")
+                fig.tight_layout()
+                fig.savefig(os.path.join(comp_dir, f"wf_{col}_violin{ws_tag}.png"), dpi=150)
+                plt.close(fig)
+
             # ── gyro_z Lateral Rotation Smoothness 관련 비교 (window 단위) ──
             gz_wf_feats = [
                 ("gyro_z_lateral_rotation_smoothness", "Lateral Rotation Smoothness (F_LRS)"),
@@ -1257,6 +1392,8 @@ def generate_html_report(
         {"suffix": "ewh_trend", "title": "Horizontal Gyro Energy (E_w_h) Trend", "strideDependent": True},
         {"suffix": "zero_crossing", "title": "Zero-Crossing Count Trend", "strideDependent": True},
         {"suffix": "gyro_z_rotation_profile", "title": "Gyro-Z Rotation Profile"},
+        {"suffix": "acc_x_bipolar", "title": "Acc-X Bipolar Amplitude Trend", "strideDependent": True},
+        {"suffix": "gyro_z_bipolar", "title": "Gyro-Z Bipolar Amplitude Trend", "strideDependent": True},
         {"suffix": "window_feature_trends_gyroz", "title": "Gyro-Z Rotation Features (Window)", "strideDependent": True},
     ])
 
@@ -1536,6 +1673,8 @@ def main():
                         help="분석 결과 출력 디렉토리 (기본: ../analysis_output)")
     parser.add_argument("--skip-graphs", action="store_true",
                         help="그래프 생성을 건너뛰고 요약/리포트만 재생성")
+    parser.add_argument("--force-graphs", action="store_true",
+                        help="이미 존재하는 그래프도 강제로 다시 생성")
     parser.add_argument("--window-sec", type=float, default=2.0,
                         help="윈도우 특징 추출 윈도우 길이 (초, 기본: 2.0)")
     parser.add_argument("--stride-sec", type=float, default=0.5,
@@ -1616,14 +1755,14 @@ def main():
             if parsed.parse_error:
                 continue
             try:
-                plot_file_graphs(parsed, graphs_dir)
+                plot_file_graphs(parsed, graphs_dir, skip_existing=not args.force_graphs)
             except Exception as e:
                 logger.warning(f"  그래프 생성 실패 ({parsed.filename}): {e}")
 
         # ── Step 6: 비교 그래프 ──
         logger.info("비교 그래프 생성 중...")
         try:
-            plot_comparative_graphs(all_parsed, out_dir)
+            plot_comparative_graphs(all_parsed, out_dir, skip_existing=not args.force_graphs)
         except Exception as e:
             logger.warning(f"  비교 그래프 생성 실패: {e}")
     else:

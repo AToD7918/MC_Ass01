@@ -10,49 +10,23 @@ package com.example.myapplication
 
 import android.content.Context
 import android.content.pm.ActivityInfo
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
+import android.hardware.*
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.*
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.text.font.*
+import androidx.compose.ui.unit.*
 import com.example.myapplication.ui.theme.MyApplicationTheme
+import org.apache.commons.math3.transform.*
 import java.util.Locale
-import kotlin.math.PI
-import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.pow
-import kotlin.math.sin
-import kotlin.math.sqrt
+import kotlin.math.*
 
 class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
 
@@ -82,6 +56,8 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
     private var featStepFq by mutableStateOf(0.0)
     private var featHF by mutableStateOf(0.0)
     private var featFLRS by mutableStateOf(0.0)
+    private var featAccXBipolar by mutableStateOf(0.0)
+    private var featGyroZBipolar by mutableStateOf(0.0)
 
     // ── Gravity 추정 (EMA 방식 — Python fallback과 동일) ──
     private var gravX = 0.0
@@ -242,6 +218,8 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
         featStepFq = features.stepFq
         featHF = features.hf
         featFLRS = features.fLrs
+        featAccXBipolar = features.accXBipolarAmp
+        featGyroZBipolar = features.gyroZBipolarAmp
 
         statusMessage = "Recognizing... (${windowSamples.size} samples in window)"
     }
@@ -257,7 +235,11 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
         val jerk: Double,        // Jerk (J_v) = mean(|d(a_v)/dt|)
         val stepFq: Double,      // step_fq (FFT peak in 0.5-4Hz)
         val hf: Double,          // HF = R_HF (high-freq energy ratio)
-        val fLrs: Double         // F_LRS (lateral rotation smoothness)
+        val fLrs: Double,        // F_LRS (lateral rotation smoothness)
+        // Bipolar amplitude: waving시 같은 window 안에 큰 +/− peak이 함께 나타나는
+        // 좌우 왕복 패턴을 잡기 위한 feature (min(max, abs(min)))
+        val accXBipolarAmp: Double,
+        val gyroZBipolarAmp: Double
     )
 
     private fun computeFeatures(samples: List<SensorSample>): Features {
@@ -390,6 +372,12 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
             fLrs = azRms * (eLow / (eHigh + eps)) * (1.0 / (kz + eps))
         }
 
+        // ── 8. Bipolar Amplitudes (waving 검출용) ──
+        // 하나의 window 안에서 acc_x / gyro_z 가 양방향으로 모두 크게 흔들렸는지 측정
+        val axRaw = DoubleArray(n) { samples[it].ax.toDouble() }
+        val accXBipolarAmp = min(axRaw.max(), abs(axRaw.min()))
+        val gyroZBipolarAmp = min(gzRaw.max(), abs(gzRaw.min()))
+
         return Features(
             accMagStd = accMagStd,
             gyroMagStd = gyroMagStd,
@@ -397,13 +385,15 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
             jerk = jerk,
             stepFq = stepFq,
             hf = hfRatio,
-            fLrs = fLrs
+            fLrs = fLrs,
+            accXBipolarAmp = accXBipolarAmp,
+            gyroZBipolarAmp = gyroZBipolarAmp
         )
     }
 
     // ====================================================================
     // 분류 트리 (rule-based)
-    // 순서: standing → running → walking → stairs_up/stairs_down
+    // 순서: standing → waving → running → walking → stairs_up/stairs_down
     // ====================================================================
 
     private fun classify(f: Features): String {
@@ -413,17 +403,21 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
         if (f.accMagStd < 1.5 && f.gyroMagStd < 1 && f.stdAv < 1 && f.jerk < 40) {
             return "STANDING"
         }
-        // 2. RUNNING: 높은 주파수, 높은 가속/자이로 변동
+        // 2. WAVING: 양방향 x축 가속도 + z축 각속도 큰 좌우 왕복 패턴
+        if (f.accXBipolarAmp > 15 && f.gyroZBipolarAmp > 3 && f.gyroMagStd > 1) {
+            return "WAVING"
+        }
+        // 3. RUNNING: 높은 주파수, 높은 가속/자이로 변동
         //    step_fq > 2.0, Acc-Mag std > 6, Gyro-Mag std > 0.4, std A_v > 7.0
         if (f.stepFq > 2.0 && f.accMagStd > 6 && f.gyroMagStd > 0.4 && f.stdAv > 7.0) {
             return "RUNNING"
         }
-        // 3. WALKING: 비교적 낮은 변동
-        //    Gyro-Mag std < 0.4, std A_v < 4.5, Jerk < 120
-        if (f.gyroMagStd < 0.4 && f.stdAv < 4.5 && f.jerk < 120) {
+        // 4. WALKING: 비교적 낮은 변동
+        //    Gyro-Mag std < 0.8, std A_v < 5, Jerk < 160
+        if (f.gyroMagStd < 0.8 && f.stdAv < 5 && f.jerk < 160) {
             return "WALKING"
         }
-        // 4. STAIRS UP / DOWN: F_LRS와 HF로 구분
+        // 5. STAIRS UP / DOWN: F_LRS와 HF로 구분
         //    F_LRS > 8 && HF < 0.4 → STAIRS_UP, 아니면 STAIRS_DOWN
         if (f.fLrs > 8 && f.hf < 0.4) {
             return "STAIRS_UP"
@@ -443,24 +437,20 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
         return sqrt(variance)
     }
 
-    /**
-     * Real FFT — numpy.fft.rfft와 동일한 출력 형태
-     * 입력: 실수 배열 (길이 N)
-     * 출력: (real, imag) 쌍 배열 (길이 N/2+1)
-     * O(N²) DFT — 2초 window(~100-200 샘플)에서는 충분히 빠름
-     */
+    /** 실수 신호에 대한 FFT (Apache Commons Math 사용, N/2+1개 주파수 성분 반환) */
     private fun rfft(signal: DoubleArray): Array<Pair<Double, Double>> {
-        val n = signal.size
-        val numOutput = n / 2 + 1
+        val origLen = signal.size
+        // Apache Commons FFT는 2의 거듭제곱 길이 필요 → zero-padding
+        var pow2 = 1
+        while (pow2 < origLen) pow2 *= 2
+        val input = signal.copyOf(pow2)
+
+        val transformer = FastFourierTransformer(DftNormalization.STANDARD)
+        val result = transformer.transform(input, TransformType.FORWARD)
+
+        val numOutput = origLen / 2 + 1
         return Array(numOutput) { k ->
-            var real = 0.0
-            var imag = 0.0
-            for (i in signal.indices) {
-                val angle = -2.0 * PI * k * i / n
-                real += signal[i] * cos(angle)
-                imag += signal[i] * sin(angle)
-            }
-            Pair(real, imag)
+            Pair(result[k].real, result[k].imaginary)
         }
     }
 
@@ -501,7 +491,7 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     if (isRecognizing) "● RECOGNIZING" else "○ IDLE",
-                    color = if (isRecognizing) Color(0xFF4CAF50) else Color.Gray,
+                    color = if (isRecognizing) Color.Red else Color.Gray,
                     fontSize = 16.sp
                 )
                 Spacer(Modifier.width(12.dp))
@@ -514,11 +504,12 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
                 fontSize = 48.sp,
                 fontWeight = FontWeight.Bold,
                 color = when (currentActivity) {
-                    "STANDING" -> Color(0xFF2196F3)
-                    "WALKING" -> Color(0xFF4CAF50)
-                    "RUNNING" -> Color(0xFFFF5722)
-                    "STAIRS_UP" -> Color(0xFFFF9800)
-                    "STAIRS_DOWN" -> Color(0xFF9C27B0)
+                    "STANDING" -> Color.Blue
+                    "WAVING" -> Color(0xFFFF6F00)
+                    "WALKING" -> Color.Green
+                    "RUNNING" -> Color.Red
+                    "STAIRS_UP" -> Color.Yellow
+                    "STAIRS_DOWN" -> Color.Magenta
                     else -> Color.Gray
                 },
                 modifier = Modifier
@@ -532,15 +523,20 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
             Text("Features (current window)", style = MaterialTheme.typography.titleSmall)
             val featureText = String.format(
                 Locale.US,
-                """Acc-Mag std:  %.4f
-Gyro-Mag std: %.4f
-std A_v:      %.4f
-Jerk:         %.4f
-step_fq:      %.4f
-HF:           %.4f
-F_LRS:        %.4f""",
+                """
+                Acc-Mag std:      %.4f
+                Gyro-Mag std:     %.4f
+                std A_v:          %.4f
+                Jerk:             %.4f
+                step_fq:          %.4f
+                HF:               %.4f
+                F_LRS:            %.4f
+                Acc-X Bipolar:    %.4f
+                Gyro-Z Bipolar:   %.4f
+                """,
                 featAccMagStd, featGyroMagStd, featStdAv,
-                featJerk, featStepFq, featHF, featFLRS
+                featJerk, featStepFq, featHF, featFLRS,
+                featAccXBipolar, featGyroZBipolar
             )
             Text(featureText, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
 

@@ -49,6 +49,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.2")
+    implementation("org.apache.commons:commons-math3:3.6.1")
     implementation(libs.google.play.services.location)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
