@@ -412,16 +412,16 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
         if (f.stepFq > 2.0 && f.accMagStd > 6 && f.gyroMagStd > 0.4 && f.stdAv > 7.0) {
             return "RUNNING"
         }
-        // 4. WALKING: 비교적 낮은 변동
-        //    Gyro-Mag std < 0.8, std A_v < 5, Jerk < 160
-        if (f.gyroMagStd < 0.8 && f.stdAv < 5 && f.jerk < 160) {
-            return "WALKING"
-        }
-        // 5. STAIRS UP / DOWN: F_LRS와 HF로 구분
-        //    F_LRS > 8 && HF < 0.4 → STAIRS_UP, 아니면 STAIRS_DOWN
-        if (f.fLrs > 8 && f.hf < 0.4) {
+        // 4. STAIRS UP: F_LRS와 HF로 구분
+        if (f.fLrs > 4 && f.hf < 0.6) {
             return "STAIRS_UP"
         }
+        // 4. WALKING / STAIRS DOWN: 비교적 낮은 변동
+        //    Gyro-Mag std < 0.8, std A_v < 5, Jerk < 130 
+        if (f.gyroMagStd < 0.8 && f.stdAv < 5 && f.jerk < 130) {
+            return "WALKING"
+        }
+        //    F_LRS > 4 && HF < 0.6 → STAIRS_UP, 아니면 STAIRS_DOWN
         return "STAIRS_DOWN"
     }
 
