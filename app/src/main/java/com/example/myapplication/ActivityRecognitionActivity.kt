@@ -408,8 +408,8 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
             return "WAVING"
         }
         // 3. RUNNING: 높은 주파수, 높은 가속/자이로 변동
-        //    step_fq > 2.0, Acc-Mag std > 6, Gyro-Mag std > 0.4, std A_v > 7.0
-        if (f.stepFq > 2.0 && f.accMagStd > 6 && f.gyroMagStd > 0.4 && f.stdAv > 7.0) {
+        //    step_fq > 2.0, Acc-Mag std > 6, Gyro-Mag std > 1, std A_v > 7.0
+        if (f.stepFq > 2.0 && f.accMagStd > 6 && f.gyroMagStd > 1 && f.stdAv > 7.0) {
             return "RUNNING"
         }
         // 4. STAIRS UP: F_LRS와 HF로 구분
@@ -418,7 +418,7 @@ class ActivityRecognitionActivity : ComponentActivity(), SensorEventListener {
         }
         // 4. WALKING / STAIRS DOWN: 비교적 낮은 변동
         //    Gyro-Mag std < 0.8, std A_v < 5, Jerk < 130 
-        if (f.gyroMagStd < 0.8 && f.stdAv < 5 && f.jerk < 130) {
+        if (f.stdAv < 5 && f.jerk < 130) {
             return "WALKING"
         }
         //    F_LRS > 4 && HF < 0.6 → STAIRS_UP, 아니면 STAIRS_DOWN
